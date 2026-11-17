@@ -13,8 +13,6 @@ sealed class LiveState
     public bool Reachable;
     /// <summary>authenticated, needs_credentials, needs_multifactor_verification…</summary>
     public string? SessionType;
-    /// <summary>"Stay signed in" was ticked for this sign-in.</summary>
-    public bool PersistLogin;
     public string? Puuid;
     public bool Authenticated => SessionType == "authenticated" && Puuid != null;
 }
@@ -223,7 +221,6 @@ static class Riot
         state.Reachable = true;
         var s = session.RootElement;
         state.SessionType = Str(s, "type");
-        state.PersistLogin = s.TryGetProperty("persistLogin", out var pl) && pl.ValueKind == JsonValueKind.True;
         if (state.SessionType != "authenticated") return state;
 
         using var auth = await GetAsync(LockFile, "RiotClientServices", "/rso-auth/v1/authorization");

@@ -17,6 +17,7 @@ sealed class Switcher
     readonly DispatcherTimer _timer;
     DateTime _lastWrite;
     DateTime _lastLeagueCheck;
+    int _unsavedTicks;
     bool _ticking;
 
     public Switcher(AccountStore store)
@@ -64,7 +65,12 @@ sealed class Switcher
 
             var live = await Riot.QueryAsync();
             if (Busy) return;
-            bool notPersistent = live.Authenticated && !live.PersistLogin;
+            // "Stay signed in" is judged by the session file, not the client's persistLogin flag: that flag only
+            // describes a fresh password sign-in and reads false after every restore from a saved session.
+            // Only flagged after a few seconds, since the client writes the file just after signing in.
+            bool unsaved = IsUnsaved(live, SessionData.InspectLive());
+            _unsavedTicks = unsaved ? _unsavedTicks + 1 : 0;
+            bool notPersistent = _unsavedTicks >= 3;
             string? active = live.Authenticated ? live.Puuid
                 : live.Reachable ? null // client open on the sign-in screen
                 : SessionData.InspectLive() is { HasSession: true } id ? id.Puuid : null;
@@ -85,6 +91,10 @@ sealed class Switcher
         catch { /* try again next tick */ }
         finally { _ticking = false; }
     }
+
+    /// <summary>Signed in, but the session file holds no saved sign-in for that account ("Stay signed in" not ticked).</summary>
+    internal static bool IsUnsaved(LiveState live, SessionIdentity file) =>
+        live.Authenticated && !(file.HasSession && file.Puuid == live.Puuid);
 
     /// <summary>Saves the live session into its account when the Riot Client has rewritten it.</summary>
     void CaptureIfChanged()

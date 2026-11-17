@@ -130,6 +130,16 @@ static class SelfTest
         await sw.TickAsync();
         Check(store.Accounts.Count == 2, "session without refresh token isn't saved");
 
+        // 8b. The "can't be saved" banner: based on the session file, not the client's persistLogin flag.
+        var signedInA = new LiveState { Reachable = true, SessionType = "authenticated", Puuid = A };
+        var fileA = SessionData.Inspect(Yaml(A, "MainGuy", "EUW", "EUW1", "refreshA9-xxxxxxxxxxxxxxxxxxxxxxxx"));
+        var fileNone = SessionData.Inspect(Yaml(A, "MainGuy", "EUW", "EUW1", "null"));
+        var fileB = SessionData.Inspect(Yaml(B, "SmurfGal", "1234", "NA1", "refreshB9-xxxxxxxxxxxxxxxxxxxxxxxx"));
+        Check(!Switcher.IsUnsaved(signedInA, fileA), "no banner when the signed-in account's session is saved");
+        Check(Switcher.IsUnsaved(signedInA, fileNone), "banner when signed in without a saved session");
+        Check(Switcher.IsUnsaved(signedInA, fileB), "banner when the file holds a different account");
+        Check(!Switcher.IsUnsaved(new LiveState { Reachable = true, SessionType = "needs_credentials" }, fileNone), "no banner on the sign-in screen");
+
         // 9. Stale lockfile from a crashed client is ignored (owner process check).
         Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config"));
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config", "lockfile"), $"Riot Client:{Environment.ProcessId}:1:pw:https");
