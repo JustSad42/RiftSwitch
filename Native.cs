@@ -97,6 +97,18 @@ static class Native
     public static void SetDwm(IntPtr hwnd, int attribute, int value) =>
         DwmSetWindowAttribute(hwnd, attribute, ref value, sizeof(int));
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int index, IntPtr value);
+
+    const int GWL_EXSTYLE = -20;
+    public const long WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+
+    public static void AddExStyle(IntPtr hwnd, long flags) =>
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, (IntPtr)((long)GetWindowLongPtr(hwnd, GWL_EXSTYLE) | flags));
+
     [DllImport("psapi.dll", EntryPoint = "EmptyWorkingSet")]
     static extern bool EmptyWorkingSet(IntPtr process);
 

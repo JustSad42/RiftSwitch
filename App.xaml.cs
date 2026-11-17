@@ -90,6 +90,14 @@ public partial class App : Application
         Store.Load();
         Switcher = new Switcher(Store);
         Switcher.Notice += Notify;
+        var launchToast = new LaunchToast();
+        Switcher.LeagueStarting += acc => launchToast.ShowStarting(acc);
+        Switcher.LeagueStarted += (_, ok) => launchToast.ShowDone(ok);
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("RIFTSWITCH_OPEN") == "launch")
+            Dispatcher.BeginInvoke(() => { if (Store.Accounts.Count > 0) launchToast.ShowStarting(Store.Accounts[^1]); },
+                DispatcherPriority.ApplicationIdle);
+#endif
 
         MainWin = new MainWindow(this);
         _quick = new QuickWindow(this);

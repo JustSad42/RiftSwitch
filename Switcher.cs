@@ -183,7 +183,7 @@ sealed class Switcher
         // Already on it: just make sure League is open.
         if (target.Id == ActiveId && !target.NeedsSignIn && Riot.IsRunning())
         {
-            if (launchLeague) _ = Riot.PressPlayAsync(TimeSpan.FromSeconds(20));
+            if (launchLeague) _ = OpenLeagueAsync(target);
             return new(ResultKind.Info, $"Already on {target.DisplayName}", launchLeague ? "Opening League." : "");
         }
 
@@ -224,9 +224,9 @@ sealed class Switcher
             if (result.Kind != ResultKind.Success || !launchLeague) return result;
 
             Progress?.Invoke("Opening League…");
-            bool started = await Riot.PressPlayAsync(TimeSpan.FromSeconds(30));
-            SwitchLog.Step(started ? "League launched" : "League didn't launch within 30 s");
-            return started ? result with { Message = "League is starting." }
+            bool started = await OpenLeagueAsync(target);
+            if (!started) SwitchLog.Step("League didn't start within a minute");
+            return started ? result with { Message = "League is open." }
                 : result with { Kind = ResultKind.Info, Message = "Press Play in the Riot Client to open League." };
         }
         catch (Exception ex)
@@ -240,6 +240,25 @@ sealed class Switcher
             target.IsBusy = false;
             StateChanged?.Invoke();
         }
+    }
+
+    /// <summary>Raised when Riot has accepted Play and is preparing League (shows the "Starting League" indicator).</summary>
+    public event Action<Account>? LeagueStarting;
+    /// <summary>Raised when League's window process exists (true) or it never started (false).</summary>
+    public event Action<Account, bool>? LeagueStarted;
+
+    async Task<bool> OpenLeagueAsync(Account target)
+    {
+        bool announced = false;
+        bool ok = await Riot.PressPlayAsync(TimeSpan.FromSeconds(30), () =>
+        {
+            if (announced) return;
+            announced = true;
+            Progress?.Invoke("Riot is starting League (takes about 10 s)…");
+            LeagueStarting?.Invoke(target);
+        });
+        if (announced) LeagueStarted?.Invoke(target, ok);
+        return ok;
     }
 
     static string? SafeLiveYaml()
