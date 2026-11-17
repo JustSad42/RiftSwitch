@@ -133,18 +133,8 @@ static class Riot
     {
         if (!IsRunning()) return;
 
-        // Ask the Riot Client to quit on its own first, so it finishes writing its files.
-        try
-        {
-            if (ReadLock(LockFile, "RiotClientServices") is { } l)
-            {
-                using var req = Request(HttpMethod.Post, l, "/process-control/v1/process/quit");
-                using var _ = await Http.SendAsync(req);
-                for (int i = 0; i < 20 && Count("RiotClientServices") > 0; i++) await Task.Delay(150);
-            }
-        }
-        catch { /* not answering: closed below */ }
-
+        // Closed straight away: the Riot Client writes a refreshed session to disk the moment it gets one,
+        // so there's nothing to flush, and a polite quit only adds 1-3 seconds.
         var clock = Stopwatch.StartNew();
         while (true)
         {
@@ -160,7 +150,41 @@ static class Riot
                 throw new IOException("The Riot Client could not be closed. Close it from the system tray and try again.");
             await Task.Delay(200);
         }
-        await Task.Delay(250); // file handles of exited processes can linger for a moment
+        await Task.Delay(100); // file handles of exited processes can linger for a moment (restore also retries)
+    }
+
+    /// <summary>
+    /// Presses Play for League in the running Riot Client. Riot's client no longer starts League on its own
+    /// after signing in (its log says "Auto-launch is disabled"), so without this it waits for a click.
+    /// Returns true once League is starting or already running.
+    /// </summary>
+    public static async Task<bool> PressPlayAsync(TimeSpan timeout)
+    {
+        if (TestMode) return true;
+        const string product = "/product-launcher/v1/products/league_of_legends/patchlines/live";
+        var clock = Stopwatch.StartNew();
+        while (clock.Elapsed < timeout)
+        {
+            if (Count("LeagueClient") > 0 || Count("LeagueClientUx") > 0) return true;
+            if (ReadLock(LockFile, "RiotClientServices") is { } l)
+            {
+                using var eligible = await GetAsync(LockFile, "RiotClientServices", product + "/eligibility");
+                using var pending = await GetAsync(LockFile, "RiotClientServices", "/product-launcher/v1/is-launch-request-pending");
+                if (pending?.RootElement.ValueKind == JsonValueKind.True) return true;
+                if (eligible?.RootElement.ValueKind == JsonValueKind.True)
+                {
+                    try
+                    {
+                        using var req = Request(HttpMethod.Post, l, product);
+                        using var res = await Http.SendAsync(req);
+                        if (res.IsSuccessStatusCode) return true;
+                    }
+                    catch { /* try again */ }
+                }
+            }
+            await Task.Delay(400);
+        }
+        return false;
     }
 
     static List<Process> TestProcesses()

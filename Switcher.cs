@@ -97,6 +97,8 @@ sealed class Switcher
         CaptureNow(announce: true);
     }
 
+    string? _lastLogged;
+
     /// <summary>Copies the live session into its saved account. Returns the account, or null if there's no session.</summary>
     Account? CaptureNow(bool announce)
     {
@@ -111,6 +113,9 @@ sealed class Switcher
         if (yaml == null || SessionData.Inspect(yaml) is not { HasSession: true } copy || copy.Puuid != who.Puuid) return null;
 
         var (acc, isNew) = _store.Upsert(copy, pack);
+        var print = SwitchLog.Describe(yaml);
+        if (announce && print != _lastLogged) SwitchLog.Write($"monitor saved {(isNew ? "NEW " : "")}{print}");
+        _lastLogged = print;
         if (announce && (isNew || AddingAccount))
         {
             AddingAccount = false;
@@ -148,10 +153,10 @@ sealed class Switcher
     {
         if (Busy) return new(ResultKind.Info, "Already switching", "Wait a moment and try again.");
 
-        // Already on it: just make sure the client (and League) is open.
+        // Already on it: just make sure League is open.
         if (target.Id == ActiveId && !target.NeedsSignIn && Riot.IsRunning())
         {
-            if (launchLeague) try { Riot.Launch(true); } catch { }
+            if (launchLeague) _ = Riot.PressPlayAsync(TimeSpan.FromSeconds(20));
             return new(ResultKind.Info, $"Already on {target.DisplayName}", launchLeague ? "Opening League." : "");
         }
 
@@ -161,21 +166,26 @@ sealed class Switcher
         target.IsBusy = true;
         AddingAccount = false;
         StateChanged?.Invoke();
+        SwitchLog.Begin($"Switch to {target.RiotId} (acct {target.Id[..4]}), open League: {launchLeague}");
         try
         {
             Progress?.Invoke("Closing Riot Client…");
             await Riot.StopAsync();
+            SwitchLog.Step("clients closed");
 
             Progress?.Invoke("Saving current sign-in…");
-            CaptureNow(announce: false);
+            var saved = CaptureNow(announce: false);
+            SwitchLog.Step(saved != null ? $"saved current: {SwitchLog.Describe(SafeLiveYaml())}" : "nothing to save (signed out)");
 
             Progress?.Invoke($"Loading {target.DisplayName}…");
             var pack = _store.LoadSession(target);
             await Task.Run(() => SessionData.Restore(pack));
             try { _lastWrite = File.GetLastWriteTimeUtc(Riot.SessionFile); } catch { }
+            SwitchLog.Step($"restored: {SwitchLog.Describe(SessionData.YamlInPack(pack))}");
 
-            Progress?.Invoke(launchLeague ? "Starting League…" : "Starting Riot Client…");
+            Progress?.Invoke("Starting Riot Client…");
             Riot.Launch(launchLeague);
+            SwitchLog.Step("Riot Client started");
             target.LastUsed = DateTime.Now;
             target.RefreshTimes();
             _store.Save();
@@ -183,10 +193,18 @@ sealed class Switcher
             StateChanged?.Invoke();
 
             Progress?.Invoke("Signing in…");
-            return await WaitForSignInAsync(target, launchLeague);
+            var result = await WaitForSignInAsync(target);
+            if (result.Kind != ResultKind.Success || !launchLeague) return result;
+
+            Progress?.Invoke("Opening League…");
+            bool started = await Riot.PressPlayAsync(TimeSpan.FromSeconds(30));
+            SwitchLog.Step(started ? "League launched" : "League didn't launch within 30 s");
+            return started ? result with { Message = "League is starting." }
+                : result with { Kind = ResultKind.Info, Message = "Press Play in the Riot Client to open League." };
         }
         catch (Exception ex)
         {
+            SwitchLog.Step($"failed: {ex.Message}");
             return new(ResultKind.Error, "Switch failed", ex.Message);
         }
         finally
@@ -197,39 +215,59 @@ sealed class Switcher
         }
     }
 
-    async Task<SwitchResult> WaitForSignInAsync(Account target, bool league)
+    static string? SafeLiveYaml()
     {
-        var done = new SwitchResult(ResultKind.Success, $"Switched to {target.DisplayName}", league ? "League is starting." : "");
+        try { return SessionData.ReadShared(Riot.SessionFile); } catch { return null; }
+    }
+
+    /// <summary>
+    /// Waits for the Riot Client to sign in with the restored session. Riot's client sometimes spends 30-40 s
+    /// fetching its configuration before it even tries, so this waits up to two minutes. A session only counts as
+    /// expired once the client throws it away (rewrites the session file without it), not just because the client
+    /// isn't signed in yet.
+    /// </summary>
+    async Task<SwitchResult> WaitForSignInAsync(Account target)
+    {
+        var done = new SwitchResult(ResultKind.Success, $"Switched to {target.DisplayName}");
         if (Riot.TestMode) return done;
 
-        DateTime start = DateTime.Now, reachableSince = default;
-        while (DateTime.Now - start < TimeSpan.FromSeconds(45))
+        var start = DateTime.Now;
+        bool slowNoted = false;
+        while (DateTime.Now - start < TimeSpan.FromMinutes(2))
         {
-            await Task.Delay(600);
+            await Task.Delay(500);
             var live = await Riot.QueryAsync();
-            if (!live.Reachable) continue;
-            if (reachableSince == default) reachableSince = DateTime.Now;
-
             if (live.Authenticated)
             {
                 target.NeedsSignIn = false;
+                SwitchLog.Step($"signed in as acct {live.Puuid?[..4]}");
                 if (live.Puuid == target.Id) return done;
                 SetActive(live.Puuid);
                 return new(ResultKind.Warning, "Signed in to a different account",
                     "The Riot Client opened another account than the one picked. Sign in to the right one and it will be saved.");
             }
-            // The client opened on its sign-in screen: the saved session has expired or was signed out.
-            if (live.SessionType is not null and not "authenticated" && DateTime.Now - reachableSince > TimeSpan.FromSeconds(5))
+
+            // Rejected: the client cleared the restored session from its file and is showing its sign-in screen.
+            if (!SessionData.InspectLive().HasSession)
             {
+                SwitchLog.Step($"saved session rejected by Riot (client session state: {live.SessionType ?? "unknown"})");
                 target.NeedsSignIn = true;
                 _store.Save();
                 SetActive(null);
                 AddingAccount = true;
                 return new(ResultKind.Warning, $"Sign in to {target.DisplayName} once",
-                    "Its saved sign-in expired. Sign in in the Riot Client with \"Stay signed in\" ticked, and RiftSwitch saves it again.");
+                    "Riot didn't accept its saved sign-in. Sign in in the Riot Client with \"Stay signed in\" ticked, and RiftSwitch saves it again.");
+            }
+
+            if (!slowNoted && DateTime.Now - start > TimeSpan.FromSeconds(12))
+            {
+                slowNoted = true;
+                Progress?.Invoke("Riot Client is slow to start, still waiting…");
+                SwitchLog.Step("Riot Client still starting (slow start on Riot's side)");
             }
         }
-        return new(ResultKind.Info, $"Switched to {target.DisplayName}", "The Riot Client is taking a while to start.");
+        SwitchLog.Step("gave up waiting for sign-in after 2 min");
+        return new(ResultKind.Info, $"Switched to {target.DisplayName}", "The Riot Client is taking a long time to sign in.");
     }
 
     /// <summary>Signs the Riot Client out (keeping the current account saved) so a new account can be signed in.</summary>
