@@ -140,6 +140,41 @@ static class SelfTest
         Check(Switcher.IsUnsaved(signedInA, fileB), "banner when the file holds a different account");
         Check(!Switcher.IsUnsaved(new LiveState { Reachable = true, SessionType = "needs_credentials" }, fileNone), "no banner on the sign-in screen");
 
+        // 8c. LP this session, rank history, tags, reorder.
+        var acc = new Account { Id = "dddddddd-4444-4444-8444-dddddddddddd", GameName = "Climber", TagLine = "EUW", Platform = "EUW1" };
+        acc.RecordSolo(new Rank { Tier = "GOLD", Division = "I", Lp = 80 });
+        Check(acc.SessionStart?.Value == 3*400 + 3*100 + 80 && acc.LpDelta == null, "first reading starts the session, no delta yet");
+        acc.Solo = new Rank { Tier = "PLATINUM", Division = "IV", Lp = 15 };
+        acc.RecordSolo(acc.Solo);
+        Check(acc.LpDelta == 35, $"LP delta counts across a promotion (+{acc.LpDelta})");
+        acc.RecordSolo(acc.Solo);
+        Check(acc.RankHistory.Count == 2 && acc.HasSpark, "history only grows when the rank changes; sparkline shown");
+        acc.SessionPending = true;
+        acc.RecordSolo(acc.Solo);
+        Check(acc.SessionStart!.Tier == "PLATINUM" && acc.LpDelta == null, "new session resets the baseline");
+        acc.Solo = new Rank { Tier = "GOLD", Division = "I", Lp = 90 };
+        acc.RecordSolo(acc.Solo);
+        Check(acc.LpDelta == -25 && acc.LpDeltaText.StartsWith("−25 LP"), "losses show as negative");
+        Check(RankPoint.ValueOf("MASTER", "I", 120) == 2920 && RankPoint.ValueOf("", "", 0) == null, "apex and unranked values");
+        Check(acc.OpGg == "https://op.gg/lol/summoners/euw/Climber-EUW" && acc.UGg.Contains("/euw1/Climber-EUW/"), "profile links");
+        acc.Streak = 3;
+        Check(acc.HasStreak && acc.StreakText == "3W streak" && acc.StreakIsWin, "win streak badge");
+        acc.Streak = -1;
+        Check(!acc.HasStreak, "a single game isn't shown as a streak");
+        acc.SavedAt = DateTime.Now.AddDays(-30);
+        Check(acc.IsStale && acc.AgeText.Contains("30 days"), "old saved sign-ins are flagged");
+
+        store.Accounts[0].Tags = ["Main", "EUW"];
+        store.Accounts[1].Tags = ["smurf", "euw"];
+        Check(store.AllTags().SequenceEqual(new[] { "EUW", "Main", "smurf" }), "tag list is merged case-insensitively");
+        var firstId = store.Accounts[0].Id;
+        store.MoveTo(store.Accounts[0], 1);
+        Check(store.Accounts[1].Id == firstId && store.Accounts[1].Slot == 2, "drag reorder moves and renumbers");
+        store.Save();
+        var store3 = new AccountStore();
+        store3.Load();
+        Check(store3.Accounts[1].Id == firstId && store3.Accounts[1].Tags.SequenceEqual(new[] { "Main", "EUW" }), "order and tags are saved");
+
         // 9. Stale lockfile from a crashed client is ignored (owner process check).
         Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config"));
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config", "lockfile"), $"Riot Client:{Environment.ProcessId}:1:pw:https");

@@ -18,6 +18,12 @@ public partial class MainWindow : Window
     string _editColor = "";
     bool _recordingHotkey;
     bool _quitting;
+    readonly ICollectionView _view;
+    string? _filterTag;
+    // Drag to reorder
+    Point _pressAt;
+    Account? _pressed;
+    bool _dragging, _justDragged;
 
     internal MainWindow(App app)
     {
@@ -25,8 +31,12 @@ public partial class MainWindow : Window
         InitializeComponent();
         Backdrop.Attach(this);
 
-        AccountList.ItemsSource = _app.Store.Accounts;
-        _app.Store.Accounts.CollectionChanged += (_, _) => UpdateEmpty();
+        _view = System.Windows.Data.CollectionViewSource.GetDefaultView(_app.Store.Accounts);
+        _view.Filter = o => _filterTag == null || o is Account a && a.Tags.Contains(_filterTag, StringComparer.OrdinalIgnoreCase);
+        AccountList.ItemsSource = _view;
+        _app.Store.Accounts.CollectionChanged += (_, _) => { UpdateEmpty(); if (!_dragging) RebuildFilters(); };
+        ApplyListMode();
+        RebuildFilters();
         _app.Switcher.StateChanged += UpdateState;
         _app.Switcher.Progress += step => BusyStep.Text = step;
         Updater.StatusChanged += () => Dispatcher.BeginInvoke(UpdateUpdateInfo);
@@ -124,7 +134,82 @@ public partial class MainWindow : Window
 
     void Card_Click(object sender, MouseButtonEventArgs e)
     {
+        _pressed = null;
+        if (_justDragged) { _justDragged = false; return; } // the press was the start of a drag, not a click
         if (AccountOf(sender) is { } a) _app.SwitchTo(a);
+    }
+
+    // ---------- drag to reorder ----------
+
+    void Card_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        _pressed = AccountOf(sender);
+        _pressAt = e.GetPosition(this);
+        _justDragged = false;
+    }
+
+    void Card_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_pressed == null || _dragging || e.LeftButton != MouseButtonState.Pressed) return;
+        var d = e.GetPosition(this) - _pressAt;
+        if (Math.Abs(d.Y) < 6 && Math.Abs(d.X) < 6) return;
+
+        var acc = _pressed;
+        _dragging = true;
+        acc.IsDragging = true;
+        try { DragDrop.DoDragDrop((DependencyObject)sender, new DataObject(typeof(Account), acc), DragDropEffects.Move); }
+        finally
+        {
+            acc.IsDragging = false;
+            _dragging = false;
+            _justDragged = true;
+            _pressed = null;
+            _app.Store.Save();
+            Dispatcher.BeginInvoke(() => _justDragged = false, DispatcherPriority.Input);
+        }
+    }
+
+    void Card_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = DragDropEffects.None;
+        if (e.Data.GetData(typeof(Account)) is not Account dragged || AccountOf(sender) is not { } over) return;
+        e.Effects = DragDropEffects.Move;
+        e.Handled = true;
+        if (over == dragged) return;
+        // Live reorder: the dragged card takes the place of the one under the mouse.
+        _app.Store.MoveTo(dragged, _app.Store.Accounts.IndexOf(over));
+    }
+
+    void Card_Drop(object sender, DragEventArgs e) => e.Handled = true;
+
+    // ---------- list mode & tag filter ----------
+
+    void ApplyListMode() =>
+        AccountList.ItemTemplate = (DataTemplate)FindResource(_app.Settings.Compact ? "AccountRow" : "AccountCard");
+
+    void RebuildFilters()
+    {
+        var tags = _app.Store.AllTags();
+        if (_filterTag != null && !tags.Contains(_filterTag, StringComparer.OrdinalIgnoreCase)) _filterTag = null;
+        FilterChips.Children.Clear();
+        FilterBar.Visibility = tags.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (tags.Count == 0) { _view.Refresh(); return; }
+
+        RadioButton Chip(string text, string? tag)
+        {
+            var rb = new RadioButton
+            {
+                Content = text, Style = (Style)FindResource("Chip"), GroupName = "filter",
+                IsChecked = string.Equals(_filterTag, tag, StringComparison.OrdinalIgnoreCase),
+                Padding = new Thickness(11, 4, 11, 4),
+            };
+            rb.Checked += (_, _) => { _filterTag = tag; _view.Refresh(); UpdateEmpty(); };
+            return rb;
+        }
+        FilterChips.Children.Add(Chip("All", null));
+        foreach (var t in tags)
+            FilterChips.Children.Add(Chip($"{t}  {_app.Store.Accounts.Count(a => a.Tags.Contains(t, StringComparer.OrdinalIgnoreCase))}", t));
+        _view.Refresh();
     }
 
     void Switch_Click(object sender, RoutedEventArgs e)
@@ -156,6 +241,15 @@ public partial class MainWindow : Window
         if (!a.IsActive) menu.Items.Add(Item("Switch", "", () => _app.SwitchTo(a), !_app.Switcher.Busy));
         menu.Items.Add(Item("Edit nickname, color, note", "", () => OpenEditor(a)));
         menu.Items.Add(Item("Copy Riot ID", "", () => { try { Clipboard.SetText(a.RiotId); ShowToast(new(ResultKind.Success, "Riot ID copied", a.RiotId)); } catch { } }));
+        if (a.GameName != "" && a.Platform != "")
+        {
+            void Link(string name, string url) => menu.Items.Add(Item($"Open on {name}", "",
+                () => { try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { } }));
+            menu.Items.Add(new Separator());
+            Link("op.gg", a.OpGg);
+            Link("u.gg", a.UGg);
+            Link("League of Graphs", a.LeagueOfGraphs);
+        }
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Move up", "", () => _app.Store.Move(a, -1), index > 0));
         menu.Items.Add(Item("Move down", "", () => _app.Store.Move(a, 1), index < _app.Store.Accounts.Count - 1));
@@ -224,6 +318,8 @@ public partial class MainWindow : Window
             rb.Checked += (s, _) => _editColor = (string)((RadioButton)s).Tag;
             EditColors.Items.Add(rb);
         }
+        EditTags.Text = string.Join(", ", a.Tags);
+        BuildTagSuggestions();
         EditButtons.Visibility = Visibility.Visible;
         RemoveConfirm.Visibility = Visibility.Collapsed;
 
@@ -233,6 +329,32 @@ public partial class MainWindow : Window
             new DoubleAnimation(320, 0, TimeSpan.FromMilliseconds(260)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
         EditLabel.Focus();
         EditLabel.SelectAll();
+    }
+
+    static List<string> ParseTags(string text) =>
+        text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(t => t.Length > 0).Select(t => t.Length > 20 ? t[..20] : t)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList();
+
+    /// <summary>Tags used on other accounts, one click to add.</summary>
+    void BuildTagSuggestions()
+    {
+        TagSuggestions.Children.Clear();
+        var current = ParseTags(EditTags.Text);
+        foreach (var tag in _app.Store.AllTags().Where(t => !current.Contains(t, StringComparer.OrdinalIgnoreCase)))
+        {
+            var b = new Button { Style = (Style)FindResource("SecondaryButton"), Padding = new Thickness(9, 2, 9, 3), FontSize = 11.5,
+                                 Margin = new Thickness(0, 0, 5, 4), Content = "+ " + tag, Focusable = false };
+            b.Click += (_, _) =>
+            {
+                var list = ParseTags(EditTags.Text);
+                list.Add(tag);
+                EditTags.Text = string.Join(", ", list);
+                BuildTagSuggestions();
+            };
+            TagSuggestions.Children.Add(b);
+        }
+        TagSuggestions.Visibility = TagSuggestions.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void CloseEditor()
@@ -249,6 +371,8 @@ public partial class MainWindow : Window
         {
             a.Label = EditLabel.Text.Trim();
             a.Note = EditNote.Text.Trim();
+            a.Tags = ParseTags(EditTags.Text);
+            RebuildFilters();
             if (_editColor != "") a.Color = _editColor;
             _app.Store.Save();
         }
@@ -295,6 +419,7 @@ public partial class MainWindow : Window
         var s = _app.Settings;
         SetLaunch.IsChecked = s.LaunchLeague;
         SetTray.IsChecked = s.CloseToTray;
+        SetCompact.IsChecked = s.Compact;
         SetUpdate.IsChecked = s.AutoUpdate;
         SetStartup.IsChecked = AutoStart.IsEnabled;
         SetStartup.IsEnabled = !AutoStart.IsDevBuild;
@@ -329,6 +454,11 @@ public partial class MainWindow : Window
         s.LaunchLeague = SetLaunch.IsChecked == true;
         s.CloseToTray = SetTray.IsChecked == true;
         s.AutoUpdate = SetUpdate.IsChecked == true;
+        if (s.Compact != (SetCompact.IsChecked == true))
+        {
+            s.Compact = SetCompact.IsChecked == true;
+            ApplyListMode();
+        }
         if (sender == SetStartup)
             try { AutoStart.Set(SetStartup.IsChecked == true); } catch { SetStartup.IsChecked = AutoStart.IsEnabled; }
         _app.SaveSettings();

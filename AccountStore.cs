@@ -30,6 +30,33 @@ sealed class Rank
             return games == 0 ? "" : $"{Wins}W {Losses}L · {Math.Round(100.0 * Wins / games)}%";
         }
     }
+
+    /// <summary>Position on the ladder in LP (Iron IV 0 LP = 0, each division 100, Master+ = 2800 + LP).</summary>
+    [JsonIgnore] public int? Value => RankPoint.ValueOf(Tier, Division, Lp);
+}
+
+/// <summary>A solo-queue rank at a moment in time (history and session start).</summary>
+sealed class RankPoint
+{
+    public DateTime At { get; set; }
+    public string Tier { get; set; } = "";
+    public string Division { get; set; } = "";
+    public int Lp { get; set; }
+
+    static readonly string[] Tiers = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND"];
+    static readonly string[] Divisions = ["IV", "III", "II", "I"];
+
+    public static int? ValueOf(string tier, string division, int lp)
+    {
+        if (tier is "MASTER" or "GRANDMASTER" or "CHALLENGER") return 2800 + lp;
+        int t = Array.IndexOf(Tiers, tier), d = Array.IndexOf(Divisions, division);
+        return t < 0 || d < 0 ? null : t * 400 + d * 100 + lp;
+    }
+
+    [JsonIgnore] public int? Value => ValueOf(Tier, Division, Lp);
+    public static RankPoint From(Rank r) => new() { At = DateTime.Now, Tier = r.Tier, Division = r.Division, Lp = r.Lp };
+    [JsonIgnore] public string Name => Tier == "" ? "Unranked"
+        : (char.ToUpper(Tier[0]) + Tier[1..].ToLower() + (Division != "" && Tier is not ("MASTER" or "GRANDMASTER" or "CHALLENGER") ? " " + Division : "")) + $" {Lp} LP";
 }
 
 sealed class Account : INotifyPropertyChanged
@@ -58,10 +85,114 @@ sealed class Account : INotifyPropertyChanged
     public int? IconId { get; set; }
     public DateTime? RankUpdated { get; set; }
 
+    // ---------- tags, history, session ----------
+
+    List<string> _tags = [];
+    public List<string> Tags { get => _tags; set { _tags = value ?? []; Changed(); Changed(nameof(HasTags)); } }
+    [JsonIgnore] public bool HasTags => Tags.Count > 0;
+
+    /// <summary>Solo-queue rank each time it changed (newest last).</summary>
+    public List<RankPoint> RankHistory { get; set; } = [];
+    /// <summary>Solo rank when the current (or last) session on this account started.</summary>
+    public RankPoint? SessionStart { get; set; }
+    /// <summary>Set when the account becomes active; the next rank reading becomes the session start.</summary>
+    public bool SessionPending { get; set; }
+
+    int? _streak;
+    /// <summary>Wins (positive) or losses (negative) in a row.</summary>
+    public int? Streak { get => _streak; set { _streak = value; Changed(); Changed(nameof(StreakText)); Changed(nameof(HasStreak)); Changed(nameof(StreakIsWin)); } }
+    [JsonIgnore] public bool HasStreak => Streak is { } s && Math.Abs(s) >= 2;
+    [JsonIgnore] public bool StreakIsWin => Streak > 0;
+    [JsonIgnore] public string StreakText => Streak is { } s ? (s > 0 ? $"{s}W streak" : $"{-s}L streak") : "";
+
+    /// <summary>LP gained or lost since the session started (across promotions).</summary>
+    [JsonIgnore]
+    public int? LpDelta => SessionStart?.Value is { } from && Solo?.Value is { } now && now != from ? now - from : null;
+    [JsonIgnore] public bool HasLpDelta => LpDelta != null;
+    [JsonIgnore] public bool LpDeltaUp => LpDelta > 0;
+    [JsonIgnore] public string LpDeltaText => LpDelta is { } d ? $"{(d > 0 ? "+" : "−")}{Math.Abs(d)} LP {(IsActive ? "this session" : "last session")}" : "";
+
+    /// <summary>Line points for the LP history sparkline (96 × 22).</summary>
+    [JsonIgnore]
+    public PointCollection? Spark
+    {
+        get
+        {
+            var vals = RankHistory.Select(p => p.Value).Where(v => v != null).Select(v => v!.Value).TakeLast(30).ToList();
+            if (vals.Count < 2) return null;
+            double min = vals.Min(), max = vals.Max(), range = Math.Max(40, max - min);
+            var pts = new PointCollection();
+            for (int i = 0; i < vals.Count; i++)
+                pts.Add(new System.Windows.Point(i * 96.0 / (vals.Count - 1), 20 - (vals[i] - min) / range * 18 + 1));
+            pts.Freeze();
+            return pts;
+        }
+    }
+    [JsonIgnore] public bool HasSpark => Spark != null;
+    [JsonIgnore]
+    public string SparkTip
+    {
+        get
+        {
+            var ranked = RankHistory.Where(p => p.Value != null).ToList();
+            if (ranked.Count < 2) return "";
+            var peak = ranked.MaxBy(p => p.Value)!;
+            return $"LP history since {ranked[0].At:d MMM}: {ranked[0].Name} → {ranked[^1].Name}\nPeak: {peak.Name} ({peak.At:d MMM})";
+        }
+    }
+
+    /// <summary>Records a new solo rank: history point if it changed, session start if one is pending.</summary>
+    public void RecordSolo(Rank r)
+    {
+        if (!r.IsRanked) return;
+        var point = RankPoint.From(r);
+        var last = RankHistory.LastOrDefault();
+        if (last == null || last.Value != point.Value)
+        {
+            RankHistory.Add(point);
+            if (RankHistory.Count > 300) RankHistory.RemoveRange(0, RankHistory.Count - 300);
+        }
+        if (SessionPending || SessionStart == null)
+        {
+            SessionStart = point;
+            SessionPending = false;
+        }
+        Changed(nameof(Spark)); Changed(nameof(HasSpark)); Changed(nameof(SparkTip));
+        Changed(nameof(LpDelta)); Changed(nameof(HasLpDelta)); Changed(nameof(LpDeltaUp)); Changed(nameof(LpDeltaText));
+    }
+
+    /// <summary>How long ago the saved sign-in was last refreshed by the Riot Client.</summary>
+    [JsonIgnore]
+    public string AgeText
+    {
+        get
+        {
+            if (SavedAt == default) return "";
+            var ago = DateTime.Now - SavedAt;
+            var text = ago.TotalMinutes < 2 ? "just now" : ago.TotalHours < 1 ? $"{(int)ago.TotalMinutes} min ago"
+                : ago.TotalDays < 1 ? $"{(int)ago.TotalHours} h ago" : ago.TotalDays < 2 ? "yesterday" : $"{(int)ago.TotalDays} days ago";
+            return $"Sign-in saved {text}";
+        }
+    }
+    /// <summary>Not refreshed for 3 weeks: Riot may ask for the password again.</summary>
+    [JsonIgnore] public bool IsStale => SavedAt != default && DateTime.Now - SavedAt > TimeSpan.FromDays(21);
+    [JsonIgnore] public string AgeTip => IsStale
+        ? "This saved sign-in hasn't been used in a while, so Riot may ask for the password again. Switching to it refreshes it."
+        : "Refreshed every time you play on this account.";
+
+    // ---------- profile links ----------
+
+    string NameTag => Uri.EscapeDataString($"{GameName}-{TagLine}");
+    [JsonIgnore] public string OpGg => $"https://op.gg/lol/summoners/{Region.ToLowerInvariant()}/{NameTag}";
+    [JsonIgnore] public string UGg => $"https://u.gg/lol/profile/{Platform.ToLowerInvariant()}/{NameTag}/overview";
+    [JsonIgnore] public string LeagueOfGraphs => $"https://www.leagueofgraphs.com/summoner/{Region.ToLowerInvariant()}/{NameTag}";
+
     // ---------- display ----------
 
     bool _active;
-    [JsonIgnore] public bool IsActive { get => _active; set { _active = value; Changed(); } }
+    [JsonIgnore] public bool IsActive { get => _active; set { _active = value; Changed(); Changed(nameof(LpDeltaText)); } }
+    bool _dragging;
+    [JsonIgnore] public bool IsDragging { get => _dragging; set { _dragging = value; Changed(); } }
     bool _busy;
     [JsonIgnore] public bool IsBusy { get => _busy; set { _busy = value; Changed(); } }
     int _slot;
@@ -142,7 +273,7 @@ sealed class Account : INotifyPropertyChanged
                 : $"Used {(int)ago.TotalDays} days ago";
         }
     }
-    public void RefreshTimes() => Changed(nameof(LastUsedText));
+    public void RefreshTimes() { Changed(nameof(LastUsedText)); Changed(nameof(AgeText)); Changed(nameof(IsStale)); Changed(nameof(AgeTip)); }
 
     public static readonly string[] Palette =
         ["#E0B95B", "#5BC0EB", "#9B7BFF", "#F2667A", "#4FD1A5", "#F59F45", "#E879C6", "#8FA3B8"];
@@ -253,6 +384,19 @@ sealed class AccountStore
         try { File.Delete(IconPath(acc.Id)); } catch { }
         Renumber();
         Save();
+    }
+
+    /// <summary>Every tag used on any account, sorted.</summary>
+    public List<string> AllTags() =>
+        Accounts.SelectMany(a => a.Tags).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>Moves an account to a position in the list (drag to reorder). Saved by the caller when the drag ends.</summary>
+    public void MoveTo(Account acc, int index)
+    {
+        int i = Accounts.IndexOf(acc);
+        if (i < 0 || index < 0 || index >= Accounts.Count || i == index) return;
+        Accounts.Move(i, index);
+        Renumber();
     }
 
     public void Move(Account acc, int delta)

@@ -79,6 +79,7 @@ public partial class QuickWindow : Window
             a.DisplayName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
             a.RiotId.Contains(q, StringComparison.OrdinalIgnoreCase) ||
             a.Note.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            a.Tags.Any(t => t.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
             a.Region.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
         List.ItemsSource = items;
         // Start on the first account that isn't the one already signed in.
@@ -89,7 +90,7 @@ public partial class QuickWindow : Window
         Empty.Visibility = none ? Visibility.Visible : Visibility.Collapsed;
         List.Visibility = none ? Visibility.Collapsed : Visibility.Visible;
         EmptyTitle.Text = _app.Store.Accounts.Count == 0 ? "No accounts yet" : "No matches";
-        EmptyText.Text = _app.Store.Accounts.Count == 0 ? "Open RiftSwitch to add one." : "Try a nickname, Riot ID or region.";
+        EmptyText.Text = _app.Store.Accounts.Count == 0 ? "Open RiftSwitch to add one." : "Try a nickname, Riot ID, tag or region.";
     }
 
     void Search_TextChanged(object sender, TextChangedEventArgs e) => Refresh();

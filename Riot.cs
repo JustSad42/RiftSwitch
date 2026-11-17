@@ -53,7 +53,7 @@ static class Riot
 
     // Closing the League client in these phases costs a dodge or a leave.
     static readonly string[] CommittedPhases =
-        ["ReadyCheck", "ChampSelect", "GameStart", "InProgress", "Reconnect", "CheckedIntoTournament"];
+        ["Matchmaking", "ReadyCheck", "ChampSelect", "GameStart", "InProgress", "Reconnect", "CheckedIntoTournament"];
 
     static readonly HttpClient Http = CreateHttp();
 
@@ -118,6 +118,7 @@ static class Riot
                 CommittedPhases.Contains(phase))
                 return phase switch
                 {
+                    "Matchmaking" => "You're in queue. Leave the queue first, or switching would pull you out of it.",
                     "ReadyCheck" => "You're in a ready check. Switching now would decline it.",
                     "ChampSelect" => "You're in champ select. Switching now would count as a dodge.",
                     _ => "League says you're in a game. Finish it before switching accounts.",
@@ -161,26 +162,33 @@ static class Riot
         if (TestMode) return true;
         const string product = "/product-launcher/v1/products/league_of_legends/patchlines/live";
         var clock = Stopwatch.StartNew();
+        string? lastRefusal = null;
         while (clock.Elapsed < timeout)
         {
             if (Count("LeagueClient") > 0 || Count("LeagueClientUx") > 0) return true;
             if (ReadLock(LockFile, "RiotClientServices") is { } l)
             {
-                using var eligible = await GetAsync(LockFile, "RiotClientServices", product + "/eligibility");
                 using var pending = await GetAsync(LockFile, "RiotClientServices", "/product-launcher/v1/is-launch-request-pending");
                 if (pending?.RootElement.ValueKind == JsonValueKind.True) return true;
-                if (eligible?.RootElement.ValueKind == JsonValueKind.True)
+
+                // Asked straight away: the client checks eligibility itself and refuses until it's ready.
+                // (Its own /eligibility endpoint answered 464 for ~15 s after the client was already able to launch.)
+                try
                 {
-                    try
+                    using var req = Request(HttpMethod.Post, l, product);
+                    using var res = await Http.SendAsync(req);
+                    if (res.IsSuccessStatusCode)
                     {
-                        using var req = Request(HttpMethod.Post, l, product);
-                        using var res = await Http.SendAsync(req);
-                        if (res.IsSuccessStatusCode) return true;
+                        SwitchLog.Step($"Play pressed (HTTP {(int)res.StatusCode})");
+                        return true;
                     }
-                    catch { /* try again */ }
+                    var refusal = $"{(int)res.StatusCode}";
+                    if (refusal != lastRefusal) SwitchLog.Step($"Play refused (HTTP {refusal}), retrying");
+                    lastRefusal = refusal;
                 }
+                catch { /* try again */ }
             }
-            await Task.Delay(400);
+            await Task.Delay(300);
         }
         return false;
     }
@@ -281,6 +289,33 @@ static class Riot
             return res.IsSuccessStatusCode ? await res.Content.ReadAsByteArrayAsync() : null;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Current win/loss streak of the signed-in player from the League client's recent games:
+    /// positive = wins in a row, negative = losses in a row, null if unknown. Remakes (under 5 min) are skipped.
+    /// </summary>
+    public static async Task<int?> GetStreakAsync(string lockFile)
+    {
+        using var doc = await GetAsync(lockFile, "LeagueClient",
+            "/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=19");
+        if (doc == null || !doc.RootElement.TryGetProperty("games", out var outer) ||
+            !outer.TryGetProperty("games", out var games) || games.ValueKind != JsonValueKind.Array) return null;
+
+        var results = new List<(long When, bool Win)>();
+        foreach (var g in games.EnumerateArray())
+        {
+            if (g.TryGetProperty("gameDuration", out var d) && d.TryGetInt32(out var secs) && secs < 300) continue;
+            if (!g.TryGetProperty("participants", out var ps) || ps.ValueKind != JsonValueKind.Array || ps.GetArrayLength() == 0) continue;
+            if (!ps[0].TryGetProperty("stats", out var stats) || !stats.TryGetProperty("win", out var win)) continue;
+            long when = g.TryGetProperty("gameCreation", out var c) && c.TryGetInt64(out var ms) ? ms : 0;
+            results.Add((when, win.ValueKind == JsonValueKind.True));
+        }
+        if (results.Count == 0) return null;
+        results.Sort((a, b) => b.When.CompareTo(a.When)); // newest first
+        bool first = results[0].Win;
+        int n = results.TakeWhile(r => r.Win == first).Count();
+        return first ? n : -n;
     }
 
     record Lock(int Port, string Password);

@@ -16,6 +16,8 @@ sealed class AppSettings
     public bool AutoUpdate { get; set; } = true;
     public AppTheme Theme { get; set; } = AppTheme.System;
     public bool TrayTipShown { get; set; }
+    /// <summary>Slim one-line rows instead of full cards.</summary>
+    public bool Compact { get; set; }
 
     // Global shortcut for the quick switcher. Default: Ctrl+Alt+A.
     public uint HotkeyModifiers { get; set; } = Native.MOD_CONTROL | Native.MOD_ALT;

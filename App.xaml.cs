@@ -7,8 +7,10 @@ namespace RiftSwitch;
 
 public partial class App : Application
 {
-    const string MutexName = @"Local\RiftSwitch.SingleInstance";
-    const string ShowEventName = @"Local\RiftSwitch.Show";
+    // A test copy (pointed at a scratch data folder) gets its own instance, so it never talks to the real one.
+    static readonly string InstanceSuffix = Environment.GetEnvironmentVariable("RIFTSWITCH_DATA") != null ? ".Test" : "";
+    static readonly string MutexName = @"Local\RiftSwitch.SingleInstance" + InstanceSuffix;
+    static readonly string ShowEventName = @"Local\RiftSwitch.Show" + InstanceSuffix;
 
     // Theme colors: (dark, light). Most are see-through so they sit on the glass background.
     static readonly (string Key, string Dark, string Light)[] Palette =

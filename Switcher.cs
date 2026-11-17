@@ -18,6 +18,7 @@ sealed class Switcher
     DateTime _lastWrite;
     DateTime _lastLeagueCheck;
     int _unsavedTicks;
+    DateTime _streakCheck;
     bool _ticking;
 
     public Switcher(AccountStore store)
@@ -49,6 +50,12 @@ sealed class Switcher
 
     void SetActive(string? id)
     {
+        // A different account signed in: its next rank reading starts a new session (for "LP this session").
+        if (id != null && id != ActiveId && _store.Find(id) is { } started)
+        {
+            started.SessionPending = true;
+            _streakCheck = default;
+        }
         ActiveId = id;
         foreach (var a in _store.Accounts) a.IsActive = a.Id == id;
     }
@@ -141,10 +148,20 @@ sealed class Switcher
     {
         var info = await Riot.QueryLeagueAsync();
         if (info?.Puuid == null || _store.Find(info.Puuid) is not { } acc) return;
+        int gamesBefore = (acc.Solo?.Wins ?? 0) + (acc.Solo?.Losses ?? 0) + (acc.Flex?.Wins ?? 0) + (acc.Flex?.Losses ?? 0);
         acc.Solo = info.Solo ?? acc.Solo;
         acc.Flex = info.Flex ?? acc.Flex;
         acc.Level = info.Level ?? acc.Level;
         acc.RankUpdated = DateTime.Now;
+        if (info.Solo != null) acc.RecordSolo(info.Solo);
+
+        // Streak: on sign-in, after a ranked game, and every few minutes (normals count too).
+        int gamesNow = (acc.Solo?.Wins ?? 0) + (acc.Solo?.Losses ?? 0) + (acc.Flex?.Wins ?? 0) + (acc.Flex?.Losses ?? 0);
+        if (gamesNow != gamesBefore || DateTime.Now - _streakCheck > TimeSpan.FromMinutes(3))
+        {
+            _streakCheck = DateTime.Now;
+            if (await Riot.GetStreakAsync(info.LockFile) is { } streak) acc.Streak = streak;
+        }
         if (info.IconId is { } icon && (icon != acc.IconId || !File.Exists(AccountStore.IconPath(acc.Id))))
         {
             if (await Riot.GetIconAsync(info.LockFile, icon) is { Length: > 0 } bytes)
