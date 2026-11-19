@@ -295,6 +295,13 @@ static class Riot
             {
                 info.Solo = ReadRank(q, "RANKED_SOLO_5x5");
                 info.Flex = ReadRank(q, "RANKED_FLEX_SR");
+                // Diamond+ inactivity: days left in the decay bank (only meaningful when it's >= 0).
+                if (q.TryGetProperty("RANKED_SOLO_5x5", out var solo) && solo.TryGetProperty("warnings", out var w) &&
+                    w.ValueKind == JsonValueKind.Object)
+                {
+                    if (w.TryGetProperty("daysUntilDecay", out var dd) && dd.TryGetInt32(out var days) && days >= 0) info.DecayDays = days;
+                    info.DecayWarning = w.TryGetProperty("displayDecayWarning", out var dw) && dw.ValueKind == JsonValueKind.True;
+                }
             }
             return info;
         }
@@ -317,43 +324,175 @@ static class Riot
     }
 
     /// <summary>Downloads a profile icon from the running League client.</summary>
-    public static async Task<byte[]?> GetIconAsync(string lockFile, int iconId)
+    public static Task<byte[]?> GetIconAsync(string lockFile, int iconId) =>
+        GetBytesAsync(lockFile, $"/lol-game-data/assets/v1/profile-icons/{iconId}.jpg");
+
+    /// <summary>Downloads a champion's square icon from the running League client.</summary>
+    public static Task<byte[]?> GetChampionIconAsync(string lockFile, int championId) =>
+        GetBytesAsync(lockFile, $"/lol-game-data/assets/v1/champion-icons/{championId}.png");
+
+    static async Task<byte[]?> GetBytesAsync(string lockFile, string path)
     {
         if (ReadLock(lockFile, "LeagueClient") is not { } l) return null;
         try
         {
-            using var req = Request(HttpMethod.Get, l, $"/lol-game-data/assets/v1/profile-icons/{iconId}.jpg");
+            using var req = Request(HttpMethod.Get, l, path);
             using var res = await Http.SendAsync(req);
             return res.IsSuccessStatusCode ? await res.Content.ReadAsByteArrayAsync() : null;
         }
         catch { return null; }
     }
 
+    static Dictionary<int, string>? _championNames;
+
+    static async Task<Dictionary<int, string>> ChampionNamesAsync(string lockFile)
+    {
+        if (_championNames is { Count: > 0 }) return _championNames;
+        var names = new Dictionary<int, string>();
+        using var doc = await GetAsync(lockFile, "LeagueClient", "/lol-game-data/assets/v1/champion-summary.json");
+        if (doc?.RootElement.ValueKind == JsonValueKind.Array)
+            foreach (var c in doc.RootElement.EnumerateArray())
+                if (c.TryGetProperty("id", out var id) && id.TryGetInt32(out var i) && i > 0 && Str(c, "name") is { } n) names[i] = n;
+        if (names.Count > 0) _championNames = names;
+        return names;
+    }
+
     /// <summary>
-    /// Current win/loss streak of the signed-in player from the League client's recent games:
-    /// positive = wins in a row, negative = losses in a row, null if unknown. Remakes (under 5 min) are skipped.
+    /// The signed-in player's last matched games, newest first. Customs and Practice Tool are left out;
+    /// games under 5 minutes are marked as remakes. Null if the League client didn't answer.
     /// </summary>
-    public static async Task<int?> GetStreakAsync(string lockFile)
+    public static async Task<List<RecentGame>?> GetRecentGamesAsync(string lockFile)
     {
         using var doc = await GetAsync(lockFile, "LeagueClient",
-            "/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=19");
+            "/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=24");
         if (doc == null || !doc.RootElement.TryGetProperty("games", out var outer) ||
             !outer.TryGetProperty("games", out var games) || games.ValueKind != JsonValueKind.Array) return null;
+        var names = await ChampionNamesAsync(lockFile);
+        return ParseGames(games, names);
+    }
 
-        var results = new List<(long When, bool Win)>();
+    internal static List<RecentGame> ParseGames(JsonElement games, IReadOnlyDictionary<int, string> names)
+    {
+        var list = new List<RecentGame>();
         foreach (var g in games.EnumerateArray())
         {
-            if (g.TryGetProperty("gameDuration", out var d) && d.TryGetInt32(out var secs) && secs < 300) continue;
+            if (Str(g, "gameType") is { } type && type != "MATCHED_GAME") continue;   // customs, Practice Tool, tutorial
             if (!g.TryGetProperty("participants", out var ps) || ps.ValueKind != JsonValueKind.Array || ps.GetArrayLength() == 0) continue;
-            if (!ps[0].TryGetProperty("stats", out var stats) || !stats.TryGetProperty("win", out var win)) continue;
-            long when = g.TryGetProperty("gameCreation", out var c) && c.TryGetInt64(out var ms) ? ms : 0;
-            results.Add((when, win.ValueKind == JsonValueKind.True));
+            var p = ps[0];
+            if (!p.TryGetProperty("stats", out var s)) continue;
+            int Int(JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.TryGetInt32(out var x) ? x : 0;
+            int secs = Int(g, "gameDuration");
+            int champ = Int(p, "championId");
+            long created = g.TryGetProperty("gameCreation", out var c) && c.TryGetInt64(out var ms) ? ms : 0;
+            list.Add(new RecentGame
+            {
+                GameId = g.TryGetProperty("gameId", out var gid) && gid.TryGetInt64(out var id) ? id : 0,
+                ChampionId = champ,
+                Champion = names.TryGetValue(champ, out var n) ? n : "",
+                Win = s.TryGetProperty("win", out var win) && win.ValueKind == JsonValueKind.True,
+                Remake = secs is > 0 and < 300,
+                Placement = Str(g, "gameMode") == "CHERRY" ? Int(s, "subteamPlacement") : 0,
+                At = created > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(created).LocalDateTime : default,
+                Minutes = secs / 60,
+                Mode = QueueName(Int(g, "queueId"), Str(g, "gameMode") ?? ""),
+                Kills = Int(s, "kills"), Deaths = Int(s, "deaths"), Assists = Int(s, "assists"),
+            });
         }
-        if (results.Count == 0) return null;
-        results.Sort((a, b) => b.When.CompareTo(a.When)); // newest first
-        bool first = results[0].Win;
-        int n = results.TakeWhile(r => r.Win == first).Count();
-        return first ? n : -n;
+        return list.OrderByDescending(x => x.At).Take(20).ToList();
+    }
+
+    static string QueueName(int queue, string mode) => queue switch
+    {
+        420 => "Ranked Solo", 440 => "Ranked Flex", 400 => "Normal Draft", 430 => "Normal Blind", 490 => "Quickplay",
+        450 => "ARAM", 900 or 1900 => "URF", 1020 => "One for All", 700 => "Clash",
+        _ => mode switch
+        {
+            "CHERRY" => "Arena", "ARAM" => "ARAM", "URF" => "URF", "CLASSIC" => "Summoner's Rift", "" => "Game",
+            _ => char.ToUpper(mode[0]) + mode[1..].ToLower(),
+        },
+    };
+
+    // Lobby restriction codes that mean "this account can't (or shouldn't) queue right now", most serious first.
+    static readonly (string Code, string Name, string Detail, bool Severe)[] PenaltyCodes =
+    [
+        ("PlayerBannedRestriction", "Banned", "This account is banned.", true),
+        ("PlayerRankedSuspensionRestriction", "Ranked suspended", "This account can't play ranked right now.", true),
+        ("PlayerQueueSuspendedRestriction", "Queue suspended", "This account can't use matchmaking right now.", true),
+        ("PlayerLeaverQueueLockoutRestriction", "Queue lockout", "Locked out of matchmaking for leaving or going AFK.", true),
+        ("PlayerDisruptiveGameplayLockoutRestriction", "Queue lockout", "Locked out of matchmaking for disruptive gameplay.", true),
+        ("PlayerLeaverBustedRestriction", "Low priority queue", "Has to wait in low priority queue for leaving games.", true),
+        ("PlayerGameBasedRankRestriction", "Ranked restricted", "Has to play normal games before ranked opens again.", true),
+        ("PlayerTimeBasedRankRestriction", "Ranked restricted", "Can't play ranked until the restriction ends.", true),
+        ("PlayerDodgeRestriction", "Dodge timer", "Can't queue until the dodge timer ends.", true),
+        ("PlayerReadyCheckFailRestriction", "Queue timer", "Can't queue for a few minutes after missing ready checks.", true),
+        ("PlayerTimedRestriction", "Queue timer", "Temporarily can't queue.", true),
+        ("PlayerLeaverTaintedWarningRestriction", "Leaver warning", "Leaving or going AFK in another game will lead to a penalty.", false),
+        ("PlayerBingeRestriction", "Playtime limit", "Has hit a playtime limit.", false),
+        ("PlayerTimePlayedRestriction", "Playtime limit", "Has hit a playtime limit.", false),
+    ];
+    static readonly int[] PenaltyQueues = [420, 440, 400, 490, 450];
+
+    /// <summary>
+    /// Asks the League client which queues the signed-in player may join and turns any personal restriction into a
+    /// penalty. Known = false when the client didn't answer (keep what we had).
+    /// </summary>
+    public static async Task<(bool Known, PenaltyInfo? Penalty)> GetPenaltyAsync(string lockFile)
+    {
+        if (ReadLock(lockFile, "LeagueClient") is not { } l) return (false, null);
+        JsonDocument? doc;
+        try
+        {
+            using var req = Request(HttpMethod.Post, l, "/lol-lobby/v2/eligibility/self");
+            req.Content = new StringContent("[]", Encoding.UTF8, "application/json");
+            using var res = await Http.SendAsync(req);
+            if (!res.IsSuccessStatusCode) return (false, null);
+            doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+        }
+        catch { return (false, null); }
+
+        PenaltyInfo? found;
+        using (doc) found = ParsePenalty(doc.RootElement);
+
+        // Games left on a ranked restriction (only reported here).
+        if (found is null or { Name: "Ranked restricted", Games: null })
+        {
+            using var rr = await GetAsync(lockFile, "LeagueClient", "/lol-leaver-buster/v1/ranked-restriction");
+            if (rr?.RootElement.TryGetProperty("punishedGamesRemaining", out var g) == true && g.TryGetInt32(out var games) && games > 0)
+                found = (found ?? new PenaltyInfo("Ranked restricted", "Has to play normal games before ranked opens again.", true)) with { Games = games };
+        }
+        return (true, found);
+    }
+
+    internal static PenaltyInfo? ParsePenalty(JsonElement eligibility)
+    {
+        if (eligibility.ValueKind != JsonValueKind.Array) return null;
+        (int Rank, PenaltyInfo Info)? best = null;
+        foreach (var q in eligibility.EnumerateArray())
+        {
+            if (!q.TryGetProperty("queueId", out var qi) || !qi.TryGetInt32(out var queue) || !PenaltyQueues.Contains(queue)) continue;
+            if (!q.TryGetProperty("restrictions", out var rs) || rs.ValueKind != JsonValueKind.Array) continue;
+            foreach (var r in rs.EnumerateArray())
+            {
+                int rank = Array.FindIndex(PenaltyCodes, c => c.Code == Str(r, "restrictionCode"));
+                if (rank < 0 || (best != null && best.Value.Rank <= rank)) continue;
+                var code = PenaltyCodes[rank];
+                DateTime? until = null;
+                int? games = null;
+                if (r.TryGetProperty("expiredTimestamp", out var ex) && ex.TryGetInt64(out var ts) && ts > 1_000_000_000_000)
+                    until = DateTimeOffset.FromUnixTimeMilliseconds(ts).LocalDateTime;
+                if (r.TryGetProperty("restrictionArgs", out var args) && args.ValueKind == JsonValueKind.Object)
+                    foreach (var a in args.EnumerateObject())
+                    {
+                        var text = a.Value.ValueKind == JsonValueKind.String ? a.Value.GetString() : a.Value.ToString();
+                        if (!long.TryParse(text, out var num) || num <= 0) continue;
+                        var key = a.Name.ToLowerInvariant();
+                        if (key.Contains("game")) games ??= (int)num;
+                        else if (until == null && key.Contains("millis")) until = DateTime.Now.AddMilliseconds(num);
+                    }
+                best = (rank, new PenaltyInfo(code.Name, code.Detail, code.Severe, until, games));
+            }
+        }
+        return best?.Info;
     }
 
     record Lock(int Port, string Password);
@@ -411,5 +550,7 @@ sealed class LeagueInfo
     public string? Puuid;
     public int? Level, IconId;
     public Rank? Solo, Flex;
+    public int? DecayDays;
+    public bool DecayWarning;
     public string LockFile = "";
 }

@@ -19,6 +19,22 @@ sealed class AppSettings
     /// <summary>Slim one-line rows instead of full cards.</summary>
     public bool Compact { get; set; }
 
+    // What account cards show (all on by default).
+    public bool ShowRecent { get; set; } = true;
+    public bool ShowDecay { get; set; } = true;
+    public bool ShowPenalty { get; set; } = true;
+    public bool ShowStreak { get; set; } = true;
+    public bool ShowLpDelta { get; set; } = true;
+    public bool ShowSpark { get; set; } = true;
+    public bool ShowAge { get; set; } = true;
+
+    /// <summary>Copies the card options to <see cref="CardOptions"/>, which the cards read.</summary>
+    public void ApplyCardOptions()
+    {
+        CardOptions.Recent = ShowRecent; CardOptions.Decay = ShowDecay; CardOptions.Penalty = ShowPenalty;
+        CardOptions.Streak = ShowStreak; CardOptions.LpDelta = ShowLpDelta; CardOptions.Spark = ShowSpark; CardOptions.Age = ShowAge;
+    }
+
     // Global shortcut for the quick switcher. Default: Ctrl+Alt+A.
     public uint HotkeyModifiers { get; set; } = Native.MOD_CONTROL | Native.MOD_ALT;
     public uint HotkeyKey { get; set; } = (uint)KeyInterop.VirtualKeyFromKey(Key.A);
@@ -59,7 +75,8 @@ sealed class AppSettings
         try
         {
             Directory.CreateDirectory(AccountStore.Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            AccountStore.WriteDurably(FilePath, System.Text.Encoding.UTF8.GetBytes(
+                JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true })));
         }
         catch { }
     }

@@ -57,6 +57,11 @@ public partial class MainWindow : Window
             switch (Environment.GetEnvironmentVariable("RIFTSWITCH_OPEN"))
             {
                 case "settings": OpenSettings_Click(this, new RoutedEventArgs()); break;
+                case "settings-cards":
+                    OpenSettings_Click(this, new RoutedEventArgs());
+                    Dispatcher.BeginInvoke(() => CardOptionsPanel.BringIntoView(new Rect(0, 0, 10, 600)),
+                        System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                    break;
                 case "edit" when _app.Store.Accounts.Count > 0: OpenEditor(_app.Store.Accounts[0]); break;
                 case "busy" when _app.Store.Accounts.Count > 1:
                     _app.Store.Accounts[1].IsBusy = true;
@@ -414,9 +419,49 @@ public partial class MainWindow : Window
 
     // ---------- settings ----------
 
+    // One switch per card extra: title, hint, read, write.
+    static readonly (string Title, string Hint, Func<AppSettings, bool> Get, Action<AppSettings, bool> Set)[] CardOptionRows =
+    [
+        ("Recent games", "Champion and win/loss of the last five games.", s => s.ShowRecent, (s, v) => s.ShowRecent = v),
+        ("Decay countdown", "Days until solo rank decays (Diamond and above).", s => s.ShowDecay, (s, v) => s.ShowDecay = v),
+        ("Penalties", "Queue lockout, low priority queue, ranked restrictions, dodge timer.", s => s.ShowPenalty, (s, v) => s.ShowPenalty = v),
+        ("Win/loss streak", "Wins or losses in a row.", s => s.ShowStreak, (s, v) => s.ShowStreak = v),
+        ("LP this session", "LP gained or lost since you signed in.", s => s.ShowLpDelta, (s, v) => s.ShowLpDelta = v),
+        ("LP history graph", "Small line of solo rank over time.", s => s.ShowSpark, (s, v) => s.ShowSpark = v),
+        ("Sign-in age", "When each saved sign-in was last refreshed.", s => s.ShowAge, (s, v) => s.ShowAge = v),
+    ];
+
+    void BuildCardOptions()
+    {
+        CardOptionsPanel.Children.Clear();
+        foreach (var row in CardOptionRows)
+        {
+            var toggle = new CheckBox
+            {
+                Style = (Style)CardOptionsPanel.FindResource("Toggle"), HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center, IsChecked = row.Get(_app.Settings),
+            };
+            toggle.Click += (_, _) =>
+            {
+                row.Set(_app.Settings, toggle.IsChecked == true);
+                _app.Settings.ApplyCardOptions();
+                foreach (var a in _app.Store.Accounts) a.ChangedAll();
+                _app.SaveSettings();
+            };
+            var text = new StackPanel { Margin = new Thickness(0, 0, 56, 0) };
+            text.Children.Add(new TextBlock { Text = row.Title, Style = (Style)CardOptionsPanel.FindResource("RowTitle") });
+            text.Children.Add(new TextBlock { Text = row.Hint, Style = (Style)CardOptionsPanel.FindResource("RowHint") });
+            var grid = new Grid();
+            grid.Children.Add(text);
+            grid.Children.Add(toggle);
+            CardOptionsPanel.Children.Add(new Border { Style = (Style)CardOptionsPanel.FindResource("Row"), Child = grid });
+        }
+    }
+
     void OpenSettings_Click(object sender, RoutedEventArgs e)
     {
         var s = _app.Settings;
+        BuildCardOptions();
         SetLaunch.IsChecked = s.LaunchLeague;
         SetTray.IsChecked = s.CloseToTray;
         SetCompact.IsChecked = s.Compact;

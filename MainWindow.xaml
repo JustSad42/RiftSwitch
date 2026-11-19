@@ -17,12 +17,12 @@
         <DataTemplate x:Key="RankExtras">
             <StackPanel Orientation="Horizontal">
                 <Border x:Name="delta" Style="{StaticResource Tag}" Background="{DynamicResource BadSoft}" Margin="8,0,0,0"
-                        Visibility="{Binding HasLpDelta, Converter={StaticResource Vis}}" ToolTip="{Binding LpDeltaText}">
+                        Visibility="{Binding ShowLpDelta, Converter={StaticResource Vis}}" ToolTip="{Binding LpDeltaText}">
                     <TextBlock x:Name="deltaText" Text="{Binding LpDelta, StringFormat='{}{0:+0;−0} LP'}" Style="{StaticResource TagText}"
                                Foreground="{DynamicResource Bad}"/>
                 </Border>
                 <Border x:Name="streak" Style="{StaticResource Tag}" Background="{DynamicResource BadSoft}" Margin="5,0,0,0"
-                        Visibility="{Binding HasStreak, Converter={StaticResource Vis}}" ToolTip="Current win/loss streak (all queues)">
+                        Visibility="{Binding ShowStreak, Converter={StaticResource Vis}}" ToolTip="Current win/loss streak (all queues)">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock x:Name="streakIcon" Text="&#xE74B;" FontFamily="{StaticResource Icons}" FontSize="9.5" VerticalAlignment="Center"
                                    Foreground="{DynamicResource Bad}" Margin="0,1,4,0"/>
@@ -40,6 +40,28 @@
                     <Setter TargetName="streakText" Property="Foreground" Value="{DynamicResource Good}"/>
                     <Setter TargetName="streakIcon" Property="Foreground" Value="{DynamicResource Good}"/>
                     <Setter TargetName="streakIcon" Property="Text" Value="&#xE74A;"/>
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- One recent game: champion icon with a win/loss bar underneath -->
+        <DataTemplate x:Key="RecentGameTile">
+            <StackPanel Margin="0,0,5,0" ToolTip="{Binding Tip}" Background="Transparent">
+                <Border Width="24" Height="24" CornerRadius="6" Background="{DynamicResource Panel}">
+                    <Border.Clip>
+                        <RectangleGeometry Rect="0,0,24,24" RadiusX="6" RadiusY="6"/>
+                    </Border.Clip>
+                    <Image x:Name="img" Source="{Binding Icon}" Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality"/>
+                </Border>
+                <Border x:Name="bar" Height="3" CornerRadius="1.5" Margin="3,3,3,0" Background="{DynamicResource Bad}"/>
+            </StackPanel>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Win}" Value="True">
+                    <Setter TargetName="bar" Property="Background" Value="{DynamicResource Good}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Remake}" Value="True">
+                    <Setter TargetName="bar" Property="Background" Value="{DynamicResource Muted}"/>
+                    <Setter TargetName="img" Property="Opacity" Value="0.45"/>
                 </DataTrigger>
             </DataTemplate.Triggers>
         </DataTemplate>
@@ -69,7 +91,7 @@
                     </Grid>
 
                     <StackPanel Grid.Column="1" Margin="12,0,8,0" VerticalAlignment="Center">
-                        <StackPanel Orientation="Horizontal">
+                        <WrapPanel>
                             <TextBlock Text="{Binding DisplayName}" FontFamily="{StaticResource DisplayFont}" FontSize="15.5"
                                        FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="210" VerticalAlignment="Center"/>
                             <Border Style="{StaticResource Tag}" Background="{DynamicResource GoodSoft}" Margin="8,0,0,0"
@@ -81,7 +103,16 @@
                                     ToolTip="Its saved sign-in expired. Switch to it and sign in once with &quot;Stay signed in&quot; ticked.">
                                 <TextBlock Text="Sign-in needed" Style="{StaticResource TagText}" Foreground="{DynamicResource Warn}"/>
                             </Border>
-                        </StackPanel>
+                            <Border x:Name="penalty" Style="{StaticResource Tag}" Background="{DynamicResource BadSoft}" Margin="8,0,0,0"
+                                    Visibility="{Binding ShowPenalty, Converter={StaticResource Vis}}" ToolTip="{Binding PenaltyTip}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="penaltyIcon" Text="&#xE7BA;" FontFamily="{StaticResource Icons}" FontSize="10"
+                                               Foreground="{DynamicResource Bad}" VerticalAlignment="Center" Margin="0,1,4,0"/>
+                                    <TextBlock x:Name="penaltyText" Text="{Binding PenaltyText}" Style="{StaticResource TagText}"
+                                               Foreground="{DynamicResource Bad}"/>
+                                </StackPanel>
+                            </Border>
+                        </WrapPanel>
 
                         <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                             <TextBlock Text="{Binding RiotId}" Foreground="{DynamicResource Muted}" FontSize="12.5" Margin="0,0,8,0"
@@ -111,13 +142,32 @@
                         <!-- LP history sparkline, then LP this session and streak -->
                         <StackPanel Orientation="Horizontal" Margin="1,6,0,0">
                             <Grid Width="96" Height="22" Background="Transparent" Margin="0,0,2,0"
-                                  ToolTip="{Binding SparkTip}" Visibility="{Binding HasSpark, Converter={StaticResource Vis}}">
+                                  ToolTip="{Binding SparkTip}" Visibility="{Binding ShowSpark, Converter={StaticResource Vis}}">
                                 <Polyline Points="{Binding Spark}" Stroke="{Binding SoloBrush}" StrokeThickness="1.6"
                                           StrokeLineJoin="Round" Opacity="0.9"/>
                             </Grid>
                             <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource RankExtras}" VerticalAlignment="Center"
                                               Margin="-2,0,0,0"/>
+                            <Border x:Name="decay" Style="{StaticResource Tag}" Margin="5,0,0,0" ToolTip="{Binding DecayTip}" VerticalAlignment="Center"
+                                    Visibility="{Binding ShowDecay, Converter={StaticResource Vis}}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="decayIcon" Text="&#xE916;" FontFamily="{StaticResource Icons}" FontSize="9.5"
+                                               Foreground="{DynamicResource Muted}" VerticalAlignment="Center" Margin="0,1,4,0"/>
+                                    <TextBlock x:Name="decayText" Text="{Binding DecayText}" Style="{StaticResource TagText}"/>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
+
+                        <!-- Last five games: champion + win/loss bar -->
+                        <ItemsControl ItemsSource="{Binding LastFive}" Focusable="False" Margin="0,7,0,0"
+                                      Visibility="{Binding ShowRecent, Converter={StaticResource Vis}}"
+                                      ItemTemplate="{StaticResource RecentGameTile}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
 
                         <TextBlock Text="{Binding Note}" Foreground="{DynamicResource Muted}" FontSize="12" FontStyle="Italic"
                                    Margin="0,6,0,0" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis"
@@ -139,7 +189,7 @@
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
-                            <TextBlock x:Name="age" Text="{Binding AgeText}" ToolTip="{Binding AgeTip}" FontSize="11.5"
+                            <TextBlock x:Name="age" Text="{Binding AgeText}" Visibility="{Binding ShowAge, Converter={StaticResource Vis}}" ToolTip="{Binding AgeTip}" FontSize="11.5"
                                        Foreground="{DynamicResource Muted}" Opacity="0.8" VerticalAlignment="Center" Margin="1,0,0,2"/>
                         </WrapPanel>
                     </StackPanel>
@@ -179,6 +229,16 @@
                     </Trigger.ExitActions>
                     <Setter TargetName="card" Property="BorderBrush" Value="{DynamicResource Thumb}"/>
                 </Trigger>
+                <DataTrigger Binding="{Binding PenaltySevere}" Value="False">
+                    <Setter TargetName="penalty" Property="Background" Value="{DynamicResource WarnSoft}"/>
+                    <Setter TargetName="penaltyText" Property="Foreground" Value="{DynamicResource Warn}"/>
+                    <Setter TargetName="penaltyIcon" Property="Foreground" Value="{DynamicResource Warn}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding DecayUrgent}" Value="True">
+                    <Setter TargetName="decay" Property="Background" Value="{DynamicResource WarnSoft}"/>
+                    <Setter TargetName="decayText" Property="Foreground" Value="{DynamicResource Warn}"/>
+                    <Setter TargetName="decayIcon" Property="Foreground" Value="{DynamicResource Warn}"/>
+                </DataTrigger>
                 <DataTrigger Binding="{Binding IsStale}" Value="True">
                     <Setter TargetName="age" Property="Foreground" Value="{DynamicResource Warn}"/>
                     <Setter TargetName="age" Property="Opacity" Value="1"/>
@@ -221,6 +281,22 @@
                                    VerticalAlignment="Center"/>
                         <TextBlock Text="!" Foreground="{DynamicResource Warn}" FontWeight="Bold" Margin="6,0,0,0" VerticalAlignment="Center"
                                    Visibility="{Binding NeedsSignIn, Converter={StaticResource Vis}}" ToolTip="Sign-in needed"/>
+                        <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource Icons}" FontSize="11" Foreground="{DynamicResource Bad}"
+                                   Margin="7,1,0,0" VerticalAlignment="Center" ToolTip="{Binding PenaltyText}"
+                                   Visibility="{Binding ShowPenalty, Converter={StaticResource Vis}}"/>
+                        <TextBlock Text="&#xE916;" FontFamily="{StaticResource Icons}" FontSize="10.5" Foreground="{DynamicResource Warn}"
+                                   Margin="7,1,0,0" VerticalAlignment="Center" ToolTip="{Binding DecayText}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding ShowDecayUrgent}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
                     </StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock Text="{Binding Solo.Short}" Foreground="{Binding SoloBrush}" FontWeight="SemiBold" FontSize="12"
@@ -589,6 +665,9 @@
                                 </StackPanel>
                             </StackPanel>
                         </Border>
+
+                        <TextBlock Text="SHOW ON CARDS" Style="{StaticResource Section}"/>
+                        <StackPanel x:Name="CardOptionsPanel"/>
 
                         <TextBlock Text="UPDATES" Style="{StaticResource Section}"/>
                         <Border Style="{StaticResource Row}">

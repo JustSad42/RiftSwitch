@@ -175,6 +175,84 @@ static class SelfTest
         store3.Load();
         Check(store3.Accounts[1].Id == firstId && store3.Accounts[1].Tags.SequenceEqual(new[] { "Main", "EUW" }), "order and tags are saved");
 
+        // 8d. Crash safety: a list zeroed by a power cut falls back to the backup; with both gone, sessions rebuild it.
+        var listPath = Path.Combine(AccountStore.Dir, "accounts.json");
+        File.WriteAllBytes(listPath, new byte[2048]);
+        var store4 = new AccountStore();
+        store4.Load();
+        Check(store4.UsedBackup && store4.Accounts.Count == 2, "damaged list falls back to the backup");
+        Check(Directory.GetFiles(AccountStore.Dir, "accounts.json.broken-*").Length > 0, "damaged list is kept aside, not overwritten");
+        File.WriteAllBytes(listPath, new byte[2048]);
+        File.Delete(listPath + ".bak");
+        var store5 = new AccountStore();
+        store5.Load();
+        Check(store5.Recovered == 2 && store5.Find(A)?.RiotId == "MainGuy#EUW" && store5.Find(B)?.RiotId == "SmurfGal#1234",
+              "accounts rebuilt from saved sessions when list and backup are both lost");
+        Check(Saved(store5, store5.Find(A)!).Contains("refreshA3"), "rebuilt account keeps its saved sign-in");
+        var store6 = new AccountStore();
+        store6.Load();
+        Check(store6.Recovered == 0 && !store6.UsedBackup && store6.Accounts.Count == 2, "rebuilt list is saved");
+
+        // 8e. Recent games: customs/Practice Tool skipped, remakes marked, newest first, streak ignores remakes.
+        static string Game(long id, string type, string mode, int queue, int secs, long created, int champ, bool win, int place = 0) =>
+            $"{{\"gameId\":{id},\"gameType\":\"{type}\",\"gameMode\":\"{mode}\",\"queueId\":{queue},\"gameDuration\":{secs},\"gameCreation\":{created}," +
+            $"\"participants\":[{{\"championId\":{champ},\"stats\":{{\"win\":{(win ? "true" : "false")},\"kills\":7,\"deaths\":2,\"assists\":9,\"subteamPlacement\":{place}}}}}]}}";
+        long t0 = DateTimeOffset.Now.AddHours(-1).ToUnixTimeMilliseconds();
+        var gamesJson = "[" + string.Join(",",
+            Game(1, "CUSTOM_GAME", "PRACTICETOOL", 3140, 3527, t0, 114, false),
+            Game(2, "MATCHED_GAME", "CLASSIC", 420, 1800, t0 - 3_000_000, 103, true),
+            Game(3, "MATCHED_GAME", "CLASSIC", 420, 200, t0 - 6_000_000, 103, false),
+            Game(4, "MATCHED_GAME", "CLASSIC", 420, 1700, t0 - 9_000_000, 64, true),
+            Game(5, "MATCHED_GAME", "CHERRY", 1700, 1400, t0 - 12_000_000, 64, false, 2),
+            Game(6, "MATCHED_GAME", "ARAM", 450, 1200, t0 - 15_000_000, 22, false)) + "]";
+        using (var gd = System.Text.Json.JsonDocument.Parse(gamesJson))
+        {
+            var recent = Riot.ParseGames(gd.RootElement, new Dictionary<int, string> { [103] = "Ahri", [64] = "Lee Sin" });
+            Check(recent.Count == 5 && recent[0].GameId == 2, "Practice Tool left out, newest first");
+            Check(recent[0].Champion == "Ahri" && recent[0].Mode == "Ranked Solo" && recent[0].Tip.Contains("7/2/9"), "game details read");
+            Check(recent[1].Remake && recent[3].Result == "2nd place" && recent[3].Mode == "Arena", "remakes and Arena placement");
+            Check(Account.StreakOf(recent) == 2, $"streak skips remakes ({Account.StreakOf(recent)})");
+            var shown = new Account { Recent = recent };
+            Check(shown.LastFive.Count == 5 && shown.ShowRecent, "last five shown on the card");
+            CardOptions.Recent = false;
+            Check(!shown.ShowRecent && shown.HasRecent, "recent games can be turned off in settings");
+            CardOptions.Recent = true;
+        }
+
+        // 8f. Penalties from League's queue check.
+        long until = DateTimeOffset.Now.AddMinutes(25).ToUnixTimeMilliseconds();
+        var elig = $$$"""
+            [{"queueId":430,"eligible":false,"restrictions":[{"restrictionCode":"QueueDisabled","expiredTimestamp":0,"restrictionArgs":{}}]},
+             {"queueId":400,"eligible":false,"restrictions":[{"restrictionCode":"PlayerDodgeRestriction","expiredTimestamp":0,"restrictionArgs":{}}]},
+             {"queueId":420,"eligible":false,"restrictions":[{"restrictionCode":"PlayerLeaverQueueLockoutRestriction","expiredTimestamp":{{{until}}},"restrictionArgs":{}}]}]
+            """;
+        using (var ed = System.Text.Json.JsonDocument.Parse(elig))
+        {
+            var p = Riot.ParsePenalty(ed.RootElement);
+            Check(p?.Name == "Queue lockout" && p.Until > DateTime.Now.AddMinutes(20), "most serious penalty picked, with its end time");
+            var pa = new Account();
+            pa.ApplyPenalty(p);
+            Check(pa.HasPenalty && pa.PenaltyText.StartsWith("Queue lockout · 25 min"), $"penalty badge text ({pa.PenaltyText})");
+            pa.PenaltyUntil = DateTime.Now.AddMinutes(-1);
+            Check(!pa.HasPenalty, "expired penalty disappears on its own");
+        }
+        using (var ok = System.Text.Json.JsonDocument.Parse("""[{"queueId":420,"eligible":true,"restrictions":[]},{"queueId":430,"eligible":false,"restrictions":[{"restrictionCode":"QueueDisabled"}]}]"""))
+            Check(Riot.ParsePenalty(ok.RootElement) == null, "disabled queues aren't penalties");
+        using (var gb = System.Text.Json.JsonDocument.Parse("""[{"queueId":420,"restrictions":[{"restrictionCode":"PlayerGameBasedRankRestriction","restrictionArgs":{"gamesRemaining":"4"}}]}]"""))
+        {
+            var pa = new Account();
+            pa.ApplyPenalty(Riot.ParsePenalty(gb.RootElement));
+            Check(pa.PenaltyText == "Ranked restricted · 4 games", $"games-based restriction ({pa.PenaltyText})");
+        }
+
+        // 8g. Decay countdown (Diamond+ only).
+        var dec = new Account { Solo = new Rank { Tier = "MASTER", Lp = 824 }, DecayAt = DateTime.Now.AddDays(13) };
+        Check(dec.HasDecay && dec.DecayText == "Decay in 13 days" && !dec.DecayUrgent, $"decay countdown ({dec.DecayText})");
+        dec.DecayAt = DateTime.Now.AddDays(2);
+        Check(dec.DecayUrgent, "decay warns in the last 3 days");
+        dec.Solo = new Rank { Tier = "EMERALD", Division = "I", Lp = 50 };
+        Check(!dec.HasDecay, "no decay shown below Diamond");
+
         // 9. Stale lockfile from a crashed client is ignored (owner process check).
         Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config"));
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Riot.DataDir)!, "Config", "lockfile"), $"Riot Client:{Environment.ProcessId}:1:pw:https");

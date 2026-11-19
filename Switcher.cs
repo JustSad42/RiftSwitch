@@ -18,7 +18,8 @@ sealed class Switcher
     DateTime _lastWrite;
     DateTime _lastLeagueCheck;
     int _unsavedTicks;
-    DateTime _streakCheck;
+    DateTime _streakCheck, _penaltyCheck;
+    string? _infoPuuid;
     bool _ticking;
 
     public Switcher(AccountStore store)
@@ -155,12 +156,45 @@ sealed class Switcher
         acc.RankUpdated = DateTime.Now;
         if (info.Solo != null) acc.RecordSolo(info.Solo);
 
-        // Streak: on sign-in, after a ranked game, and every few minutes (normals count too).
+        // A different account in League than last time: fetch everything right away.
+        if (info.Puuid != _infoPuuid)
+        {
+            _infoPuuid = info.Puuid;
+            _streakCheck = _penaltyCheck = default;
+        }
+
+        // Decay bank (Diamond+): stored as a date so the countdown keeps going while the account isn't played.
+        if (info.DecayDays is { } days && acc.DecayApplies)
+        {
+            var at = DateTime.Now.AddDays(days);
+            if (acc.DecayAt is not { } old || Math.Abs((old - at).TotalHours) > 1) acc.DecayAt = at;
+            acc.DecayWarn = info.DecayWarning;
+        }
+        else if (info.Solo != null && !acc.DecayApplies) acc.DecayAt = null;
+
+        // Recent games and streak: on sign-in, after a ranked game, and every few minutes (normals count too).
         int gamesNow = (acc.Solo?.Wins ?? 0) + (acc.Solo?.Losses ?? 0) + (acc.Flex?.Wins ?? 0) + (acc.Flex?.Losses ?? 0);
         if (gamesNow != gamesBefore || DateTime.Now - _streakCheck > TimeSpan.FromMinutes(3))
         {
             _streakCheck = DateTime.Now;
-            if (await Riot.GetStreakAsync(info.LockFile) is { } streak) acc.Streak = streak;
+            if (await Riot.GetRecentGamesAsync(info.LockFile) is { } games)
+            {
+                foreach (var id in games.Take(5).Select(g => g.ChampionId).Distinct())
+                    if (id > 0 && !ChampionIcons.Has(id) && await Riot.GetChampionIconAsync(info.LockFile, id) is { Length: > 0 } png)
+                        ChampionIcons.Save(id, png);
+                if (!games.Select(g => g.GameId).SequenceEqual(acc.Recent.Select(g => g.GameId))) acc.Recent = games;
+                acc.Streak = Account.StreakOf(games);
+            }
+        }
+
+        // Penalties: once a minute (timers run out on their own; the card counts down between checks).
+        if (DateTime.Now - _penaltyCheck > TimeSpan.FromMinutes(1))
+        {
+            _penaltyCheck = DateTime.Now;
+            var (known, penalty) = await Riot.GetPenaltyAsync(info.LockFile);
+            if (known && (penalty?.Name != acc.Penalty || penalty?.Games != acc.PenaltyGames ||
+                          (penalty?.Until is { } u && acc.PenaltyUntil is { } pu ? Math.Abs((u - pu).TotalMinutes) > 1 : penalty?.Until != acc.PenaltyUntil)))
+                acc.ApplyPenalty(penalty);
         }
         if (info.IconId is { } icon && (icon != acc.IconId || !File.Exists(AccountStore.IconPath(acc.Id))))
         {
@@ -183,7 +217,11 @@ sealed class Switcher
         // Already on it: just make sure League is open.
         if (target.Id == ActiveId && !target.NeedsSignIn && Riot.IsRunning())
         {
-            if (launchLeague) _ = OpenLeagueAsync(target);
+            if (launchLeague)
+            {
+                SwitchLog.Begin($"Already on {target.RiotId}, opening League");
+                _ = OpenLeagueAsync(target);
+            }
             return new(ResultKind.Info, $"Already on {target.DisplayName}", launchLeague ? "Opening League." : "");
         }
 

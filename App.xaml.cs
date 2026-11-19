@@ -84,10 +84,17 @@ public partial class App : Application
 
         Updater.CleanUp();
         Settings = AppSettings.Load();
+        Settings.ApplyCardOptions();
         ApplyTheme();
         SystemEvents.UserPreferenceChanged += (_, _) => Dispatcher.BeginInvoke(ApplyTheme);
 
         Store.Load();
+        if (Store.Recovered > 0 || Store.UsedBackup)
+            Dispatcher.BeginInvoke(() => Notify(new SwitchResult(ResultKind.Info,
+                Store.Recovered > 0 ? $"Recovered {Store.Recovered} account{(Store.Recovered == 1 ? "" : "s")}" : "Account list restored",
+                "The account list was damaged (probably by a crash or power cut) and has been rebuilt from your saved sign-ins." +
+                (Store.Recovered > 0 ? " Nicknames, notes and tags on those accounts couldn't be recovered." : ""))),
+                DispatcherPriority.ApplicationIdle);
         Switcher = new Switcher(Store);
         Switcher.Notice += Notify;
         var launchToast = new LaunchToast();
