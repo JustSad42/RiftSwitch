@@ -12,7 +12,7 @@
     <RootNamespace>RiftSwitch</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <!-- Release version. Bumped by release.ps1; GitHub builds pass the tag version in. -->
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
     <Product>RiftSwitch</Product>
   </PropertyGroup>
 

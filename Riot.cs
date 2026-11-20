@@ -167,10 +167,18 @@ static class Riot
     static bool LeagueRunning() => Count("LeagueClientUx") > 0 || Count("LeagueClient") > 0;
 
     /// <summary>
+    /// The Riot Client's full app is up. Riot also keeps a stripped-down "background mode" running after Windows
+    /// starts (only RiotClientServices, no window): it has no Play button, so pressing Play there gets 404s.
+    /// </summary>
+    public static bool FullClientRunning() => TestMode ? IsRunning() : Count("Riot Client") > 0 || Count("RiotClientUx") > 0;
+
+    /// <summary>
     /// Presses Play for League in the running Riot Client. Riot's client no longer starts League on its own
     /// after signing in (its log says "Auto-launch is disabled"), so without this it waits for a click.
     /// <paramref name="starting"/> is called once Riot has accepted the press and is preparing League (Riot's
     /// own telemetry puts that at 10-14 s, the same as a manual click). Returns true once League's process exists.
+    /// <paramref name="timeout"/> is how long to keep trying before Riot accepts the press; after that, Riot gets
+    /// another 40 s to actually start League.
     /// </summary>
     public static async Task<bool> PressPlayAsync(TimeSpan timeout, Action? starting = null)
     {
@@ -178,57 +186,87 @@ static class Riot
         const string product = "/product-launcher/v1/products/league_of_legends/patchlines/live";
         var clock = Stopwatch.StartNew();
         string? lastRefusal = null;
-        bool accepted = false;
+        TimeSpan? acceptedAt = null;   // when Riot (apparently) took the press
+        bool announced = false, woke = false;
+        Task<int>? post = null;
+        TimeSpan postStarted = default;
 
-        while (clock.Elapsed < timeout && !accepted)
+        void Accept(string how)
         {
-            if (LeagueRunning()) { starting?.Invoke(); return true; }
-            if (ReadLock(LockFile, "RiotClientServices") is not { } l) { await Task.Delay(300); continue; }
+            acceptedAt = clock.Elapsed;
+            SwitchLog.Step(how);
+            if (!announced) { announced = true; starting?.Invoke(); }
+        }
 
-            // Asked straight away: the client checks eligibility itself and answers 464 until the account's
-            // agreements have loaded (about a second after sign-in). Refusals come back in well under a second.
-            var post = Task.Run(async () =>
+        while (true)
+        {
+            if (LeagueRunning())
+            {
+                SwitchLog.Step("League started");
+                if (!announced) starting?.Invoke();
+                return true;
+            }
+            if (acceptedAt == null && clock.Elapsed > timeout) return false;
+            if (clock.Elapsed > timeout + TimeSpan.FromSeconds(40)) return false;
+
+            // A press is in flight: Riot holds the request (and its whole API) while it prepares League.
+            if (post != null)
+            {
+                if (!post.IsCompleted)
+                {
+                    if (acceptedAt == null && clock.Elapsed - postStarted > TimeSpan.FromSeconds(1.5))
+                        Accept("Play accepted, Riot is preparing League");
+                    await Task.Delay(250);
+                    continue;
+                }
+                int? code = post.IsCompletedSuccessfully ? post.Result : null;
+                post = null;
+                if (code is >= 200 and < 300 or 423)       // 423 = already launching or launched
+                {
+                    if (acceptedAt == null) Accept($"Play accepted (HTTP {code})");
+                }
+                else
+                {
+                    // Refused after all (it was only slow to answer): press again.
+                    if (acceptedAt != null) SwitchLog.Step($"Play was refused after all (HTTP {code?.ToString() ?? "no answer"}), pressing again");
+                    acceptedAt = null;
+                    if (code == 404 && !woke && !FullClientRunning())
+                    {
+                        // Background mode: start the full client the way Riot's own shortcut does.
+                        woke = true;
+                        SwitchLog.Step("Riot Client was in background mode, waking it");
+                        try { Launch(league: true); } catch { }
+                    }
+                    else if (code != null && $"{code}" != lastRefusal) SwitchLog.Step($"Play not ready yet (HTTP {code}), retrying");
+                    lastRefusal = code?.ToString();
+                    await Task.Delay(code == 404 ? 500 : 250);
+                }
+                continue;
+            }
+
+            // Pressed, but League hasn't shown up 20 s later: press once more (Riot answers 423 if it's on its way).
+            if (acceptedAt is { } since && clock.Elapsed - since < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(250);
+                continue;
+            }
+            if (acceptedAt != null)
+            {
+                SwitchLog.Step("League hasn't started 20 s after Play, pressing again");
+                acceptedAt = clock.Elapsed;
+            }
+
+            if (ReadLock(LockFile, "RiotClientServices") is not { } l) { await Task.Delay(300); continue; }
+            // Asked straight away: the client answers 464 until the account's agreements have loaded (about a
+            // second after sign-in). Refusals come back in well under a second.
+            postStarted = clock.Elapsed;
+            post = Task.Run(async () =>
             {
                 using var req = Request(HttpMethod.Post, l, product);
                 using var res = await LaunchHttp.SendAsync(req);
                 return (int)res.StatusCode;
             });
-            if (await Task.WhenAny(post, Task.Delay(1500)) != post)
-            {
-                // Still waiting after 1.5 s: the client took the press and is preparing League.
-                accepted = true;
-                SwitchLog.Step("Play accepted, Riot is preparing League");
-                starting?.Invoke();
-                break;
-            }
-            int code;
-            try { code = await post; }
-            catch { await Task.Delay(300); continue; }
-
-            if (code is >= 200 and < 300 or 423) // 423 = already launching or launched
-            {
-                accepted = true;
-                SwitchLog.Step($"Play accepted (HTTP {code})");
-                starting?.Invoke();
-                break;
-            }
-            if ($"{code}" != lastRefusal) SwitchLog.Step($"Play not ready yet (HTTP {code}), retrying");
-            lastRefusal = $"{code}";
-            await Task.Delay(250);
         }
-        if (!accepted) return false;
-
-        // One press is enough: wait for League's process instead of pressing again.
-        while (clock.Elapsed < timeout + TimeSpan.FromSeconds(30))
-        {
-            if (LeagueRunning())
-            {
-                SwitchLog.Step("League started");
-                return true;
-            }
-            await Task.Delay(250);
-        }
-        return false;
     }
 
     static List<Process> TestProcesses()

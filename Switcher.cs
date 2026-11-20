@@ -220,7 +220,13 @@ sealed class Switcher
             if (launchLeague)
             {
                 SwitchLog.Begin($"Already on {target.RiotId}, opening League");
-                _ = OpenLeagueAsync(target);
+                // Riot's background mode (after Windows starts) has no Play button: wake the full client first.
+                if (!Riot.FullClientRunning())
+                {
+                    SwitchLog.Step("Riot Client is in background mode, waking it");
+                    try { Riot.Launch(league: true); } catch { }
+                }
+                _ = OpenLeagueAsync(target, announceNow: true);
             }
             return new(ResultKind.Info, $"Already on {target.DisplayName}", launchLeague ? "Opening League." : "");
         }
@@ -263,7 +269,6 @@ sealed class Switcher
 
             Progress?.Invoke("Opening League…");
             bool started = await OpenLeagueAsync(target);
-            if (!started) SwitchLog.Step("League didn't start within a minute");
             return started ? result with { Message = "League is open." }
                 : result with { Kind = ResultKind.Info, Message = "Press Play in the Riot Client to open League." };
         }
@@ -285,16 +290,24 @@ sealed class Switcher
     /// <summary>Raised when League's window process exists (true) or it never started (false).</summary>
     public event Action<Account, bool>? LeagueStarted;
 
-    async Task<bool> OpenLeagueAsync(Account target)
+    async Task<bool> OpenLeagueAsync(Account target, bool announceNow = false)
     {
         bool announced = false;
-        bool ok = await Riot.PressPlayAsync(TimeSpan.FromSeconds(30), () =>
+        if (announceNow)
+        {
+            // No busy screen on this path: show the "Starting League" pill straight away.
+            announced = true;
+            LeagueStarting?.Invoke(target);
+        }
+        // Up to 75 s for Riot to accept Play: its client sometimes spends 20-40 s fetching its settings first.
+        bool ok = await Riot.PressPlayAsync(TimeSpan.FromSeconds(75), () =>
         {
             if (announced) return;
             announced = true;
             Progress?.Invoke("Riot is starting League (takes about 10 s)…");
             LeagueStarting?.Invoke(target);
         });
+        if (!ok) SwitchLog.Step("League didn't start");
         if (announced) LeagueStarted?.Invoke(target, ok);
         return ok;
     }
