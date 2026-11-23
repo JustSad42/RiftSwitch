@@ -127,10 +127,19 @@ static class Updater
     /// <summary>Called on startup: removes the previous version left behind by an update.</summary>
     public static void CleanUp()
     {
-        for (int i = 0; i < 10; i++)
+        // Off the UI thread: the old exe may still be closing, and retrying must not hold up start-up.
+        Task.Run(() =>
         {
-            try { if (File.Exists(OldPath)) File.Delete(OldPath); if (File.Exists(NewPath) && Ready == null) File.Delete(NewPath); return; }
-            catch { Thread.Sleep(300); }
-        }
+            for (int i = 0; i < 20; i++)
+            {
+                try
+                {
+                    if (File.Exists(OldPath)) File.Delete(OldPath);
+                    if (File.Exists(NewPath) && Ready == null) File.Delete(NewPath);
+                    return;
+                }
+                catch { Thread.Sleep(500); }
+            }
+        });
     }
 }
