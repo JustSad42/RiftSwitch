@@ -361,7 +361,8 @@
             </Setter>
         </Style>
 
-        <!-- Spinning arc. Spins whenever it's shown. -->
+        <!-- Spinning arc. Spins only while it's actually on screen: a running animation keeps WPF's frame clock
+             ticking 60 times a second even for hidden elements, which costs CPU all day in the tray. -->
         <Style x:Key="Spinner" TargetType="Path">
             <Setter Property="Width" Value="18"/>
             <Setter Property="Height" Value="18"/>
@@ -378,14 +379,19 @@
                 </Setter.Value>
             </Setter>
             <Style.Triggers>
-                <EventTrigger RoutedEvent="Loaded">
-                    <BeginStoryboard>
-                        <Storyboard>
-                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
-                                             From="0" To="360" Duration="0:0:0.9" RepeatBehavior="Forever"/>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
+                <Trigger Property="IsVisible" Value="True">
+                    <Trigger.EnterActions>
+                        <BeginStoryboard x:Name="spin">
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                 From="0" To="360" Duration="0:0:0.9" RepeatBehavior="Forever"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <RemoveStoryboard BeginStoryboardName="spin"/>
+                    </Trigger.ExitActions>
+                </Trigger>
             </Style.Triggers>
         </Style>
 

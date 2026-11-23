@@ -41,9 +41,21 @@ static partial class SessionData
         return id;
     }
 
+    // The background check asks for this every couple of seconds: only read and decode the file when it changed.
+    sealed record LiveCache(DateTime Write, long Length, SessionIdentity Who);
+    static LiveCache? _liveCache;   // swapped as a whole, so it's safe to read from any thread
+
     public static SessionIdentity InspectLive()
     {
-        try { return Inspect(ReadShared(Riot.SessionFile)); }
+        try
+        {
+            var info = new FileInfo(Riot.SessionFile);
+            if (!info.Exists) return new SessionIdentity();
+            if (_liveCache is { } c && c.Write == info.LastWriteTimeUtc && c.Length == info.Length) return c.Who;
+            var who = Inspect(ReadShared(Riot.SessionFile));
+            _liveCache = new LiveCache(info.LastWriteTimeUtc, info.Length, who);
+            return who;
+        }
         catch { return new SessionIdentity(); }
     }
 

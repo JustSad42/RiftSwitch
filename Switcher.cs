@@ -43,6 +43,14 @@ sealed class Switcher
     /// <summary>Something worth telling the user (account saved, session expired…).</summary>
     public event Action<SwitchResult>? Notice;
 
+    /// <summary>
+    /// Checks every 2 s while a RiftSwitch window is open (so the list reacts at once), every 5 s from the tray.
+    /// </summary>
+    public bool FastPolling
+    {
+        set => _timer.Interval = TimeSpan.FromSeconds(value ? 2 : 5);
+    }
+
     public void Start()
     {
         _timer.Start();

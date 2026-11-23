@@ -118,6 +118,12 @@ public partial class App : Application
 
         if (!AutoStart.IsDevBuild && !StartMenu.Exists) try { StartMenu.Create(); } catch { }
 
+        // Poll quickly only while a window is open; the tray needs far less.
+        void UpdatePolling() => Switcher.FastPolling = MainWin.IsVisible || _quick.IsVisible || Switcher.AddingAccount;
+        MainWin.IsVisibleChanged += (_, _) => UpdatePolling();
+        _quick.IsVisibleChanged += (_, _) => UpdatePolling();
+        Switcher.StateChanged += UpdatePolling;
+        UpdatePolling();
         Switcher.Start();
 
         if (e.Args.Contains("--updated"))
