@@ -2,6 +2,8 @@
 
 Switch between your Riot accounts in one click. Windows only.
 
+<p align="center"><img src="docs/screenshots/accounts.png" width="460" alt="RiftSwitch: saved accounts with nicknames, Riot IDs, regions, levels and Solo ranks"></p>
+
 - **One click or one shortcut.** Press **Ctrl + Alt + A** anywhere, then **1-9** or **Enter**. You can also click an account in the window or the tray menu.
 - **No passwords stored.** RiftSwitch keeps a copy of each account's "Stay signed in" session, encrypted with Windows DPAPI so only your Windows user can read it.
 - **Sessions stay fresh.** While the Riot Client runs, the session it writes is copied back into the account automatically. Any new account you sign in to with "Stay signed in" is saved too.
@@ -19,6 +21,13 @@ Switch between your Riot accounts in one click. Windows only.
 4. Switch with a click, or with **Ctrl + Alt + A**.
 
 Don't use **Sign out** in the Riot Client: it ends that session on Riot's side, and you'd need to sign in to it again. If a session does expire, RiftSwitch tells you, and signing in once saves it again.
+
+| | | |
+|---|---|---|
+| <img src="docs/screenshots/switching.png" width="280" alt="Switching to another account"> | <img src="docs/screenshots/edit.png" width="280" alt="Editing an account's nickname, color, note and tags"> | <img src="docs/screenshots/card-options.png" width="280" alt="Settings for what the account cards show"> |
+| Click an account: RiftSwitch closes the Riot Client, swaps the session and opens League. | Give each account a nickname, color, note and tags. | Choose what the cards show: recent games, decay, penalties, streaks, LP. |
+
+The accounts in these screenshots are made up.
 
 ## How it works
 
